@@ -1,0 +1,31 @@
+# ===========================================================================
+# THE MOST IMPORTANT FILE IN THIS REPOSITORY
+# ===========================================================================
+#
+# .env holds your OANDA token, your Discord bot token and your Groq key.
+# Anyone holding those can place orders on your account and run your bot.
+#
+# If the repository is public, committing .env publishes them to the entire
+# internet, and scrapers find leaked keys in minutes. This line is what
+# stops that happening by accident.
+#
+# NEVER remove it.
+.env
+
+# Your trade history and settings. Yours, not the repo's — and if it were
+# committed, a git pull would overwrite your real trades with whatever was
+# in the repo.
+*.db
+positions.db
+
+# Python leftovers
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Local scratch
+*.log
+*.tar.gz
+*.zip

@@ -1,0 +1,9 @@
+# What the forex bot needs. Three packages, all small, all quick to install.
+discord.py>=2.3.2
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# Only needed if you switch back to shares with DATA_SOURCE=yahoo. It pulls
+# in pandas and numpy, which are large and slow to install, so it is left
+# out by default. Uncomment the line below if you ever need it.
+# yfinance>=0.2.40
