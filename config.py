@@ -88,6 +88,21 @@ class CyferParams:
     # [CHOICE] How close price must be to a level to count as "at" it.
     at_level_pct: float = 0.30
 
+    # [BOOK p44] Support is a floor that price bounces UP from; resistance
+    # is a ceiling it turns DOWN from. So price has to be on the right side
+    # of the level for it to be doing that job. A close this far through
+    # it means the level has broken, whatever the distance check says.
+    #
+    # [CHOICE] How far through is "broken". Kept well inside the stop
+    # buffer, so a setup that passes can never put its stop closer to the
+    # entry than (stop_buffer_pct - level_break_pct).
+    #
+    # [FIX 2026-09-22] Added after a live EUR/USD alert read price 10 pips
+    # BELOW support as "at support". The stop then sat 7 pips from entry,
+    # which inflated reward-to-risk to 6:1 and ticked two conditions green
+    # for the wrong reason.
+    level_break_pct: float = 0.05
+
     # [CHOICE] The book shows trends as five or six steps but sets no
     # minimum. Three of each is the fewest that can establish a pattern.
     trend_swings_required: int = 3

@@ -264,13 +264,39 @@ def nearest_level(levels: Sequence[Level], price: float,
         if candidates else None
 
 
+def holding(level: Level, price: float) -> bool:
+    """
+    Is price on the side of this level that makes it a level?
+
+    [BOOK p44] Support is a floor price bounces up from, so price must be
+    at or above it. Resistance is a ceiling, so price must be at or below
+    it. A close more than level_break_pct through means it has broken.
+    """
+    # getattr so that a cyfer.py uploaded without its matching config.py
+    # still runs, rather than raising inside the scan loop — where the
+    # error is caught and logged, and the bot goes on looking healthy while
+    # never finding a setup again.
+    pct = getattr(CONFIG.cyfer, "level_break_pct", 0.05)
+    tol = level.price * pct / 100
+    if level.kind == "support":
+        return price >= level.price - tol
+    return price <= level.price + tol
+
+
 def at_level(levels: Sequence[Level], price: float,
              kind: str) -> Optional[Level]:
-    """Is price currently sitting at a level of this kind?"""
+    """
+    Is price sitting at a level of this kind, AND holding it?
+
+    Near is not enough. The nearest support 10 pips above price is not
+    support — price has already fallen through it.
+    """
     lvl = nearest_level(levels, price, kind)
     if lvl is None:
         return None
-    return lvl if lvl.distance_pct(price) <= CONFIG.cyfer.at_level_pct else None
+    if lvl.distance_pct(price) > CONFIG.cyfer.at_level_pct:
+        return None
+    return lvl if holding(lvl, price) else None
 
 
 # ===========================================================================
@@ -376,13 +402,49 @@ def scan(ticker: str,
     swings_htf = strategy.find_swings(bars_htf)
     trend = trend_state(bars_htf, swings_htf)
     price = bars_ltf[-1].close
+    levels = find_levels(bars_htf, timeframe="HTF", swings=swings_htf)
 
-    sig = Signal(ticker=ticker, direction=trend.direction or "bullish",
+    # --- which way is this setup facing? ---------------------------------
+    #
+    # With a trend, the trend decides  [BOOK p39-41: trade with it].
+    #
+    # Without one, there used to be a silent default to "bullish", and every
+    # later check was then measured against a direction nothing on the
+    # chart had chosen. A ranging market at resistance would be reported as
+    # a bullish setup missing its support. Now the direction comes from the
+    # level price is actually holding, and if it has to fall back, the
+    # alert says so rather than pretending it read something.
+    if trend.is_trending:
+        direction = trend.direction
+    else:
+        on_support = at_level(levels, price, "support")
+        on_resist = at_level(levels, price, "resistance")
+        if on_resist and not on_support:
+            direction = "bearish"
+            why = f"price is holding resistance `{fmt(on_resist.price, ticker)}`"
+        elif on_support and not on_resist:
+            direction = "bullish"
+            why = f"price is holding support `{fmt(on_support.price, ticker)}`"
+        elif on_support and on_resist:
+            nearer = min((on_support, on_resist),
+                         key=lambda l: l.distance_pct(price))
+            direction = "bullish" if nearer.kind == "support" else "bearish"
+            why = f"price is nearest {nearer.kind} `{fmt(nearer.price, ticker)}`"
+        elif ema_direction:
+            direction = ema_direction
+            why = "no level is holding, so the EMA stack was used"
+        else:
+            direction = "bullish"
+            why = "no level is holding and no EMA stack was given — a guess"
+
+    sig = Signal(ticker=ticker, direction=direction,     # type: ignore[arg-type]
                  trend=trend)
+    if not trend.is_trending:
+        sig.notes.append(f"No trend to follow, so this is read as "
+                         f"{direction} because {why}.")
 
     # --- 1. trend  [p39-41] ------------------------------------------------
     if trend.is_trending:
-        sig.direction = trend.direction            # type: ignore[assignment]
         sig.conditions_met.append(
             f"Trend: **{trend.kind}** ({trend.basis})")
     else:
@@ -390,27 +452,32 @@ def scan(ticker: str,
             f"No clean trend — {trend.kind} ({trend.basis}). "
             f"The book's setups need a trend to run with.")
 
-    # --- 2. at a level  [p44-45] ------------------------------------------
-    levels = find_levels(bars_htf, timeframe="HTF", swings=swings_htf)
+    # --- 2. at a level, and holding it  [p44-45] --------------------------
     wanted_kind = "support" if sig.direction == "bullish" else "resistance"
-    level = at_level(levels, price, wanted_kind)
+    near = nearest_level(levels, price, wanted_kind)
+    level = None
 
-    if level:
+    if near is None:
+        sig.conditions_missing.append(
+            f"No {wanted_kind} with {c.level_min_touches}+ rejections")
+    elif near.distance_pct(price) > c.at_level_pct:
+        sig.conditions_missing.append(
+            f"Not at {wanted_kind} — nearest is "
+            f"`{fmt(near.price, ticker)}`, "
+            f"{near.distance_pct(price):.2f}% away "
+            f"(need within {c.at_level_pct}%)")
+    elif not holding(near, price):
+        side = "below" if wanted_kind == "support" else "above"
+        sig.conditions_missing.append(
+            f"Price `{fmt(price, ticker)}` is {side} {wanted_kind} "
+            f"`{fmt(near.price, ticker)}` — the level has broken, so it "
+            f"isn't doing a {wanted_kind}'s job any more")
+    else:
+        level = near
         sig.level = level
         sig.conditions_met.append(
-            f"At {level.kind} `{fmt(level.price, ticker)}` "
+            f"At {level.kind} `{fmt(level.price, ticker)}` and holding "
             f"({level.touches} rejections, needs {c.level_min_touches})")
-    else:
-        near = nearest_level(levels, price, wanted_kind)
-        if near:
-            sig.conditions_missing.append(
-                f"Not at {wanted_kind} — nearest is "
-                f"`{fmt(near.price, ticker)}`, "
-                f"{near.distance_pct(price):.2f}% away "
-                f"(need within {c.at_level_pct}%)")
-        else:
-            sig.conditions_missing.append(
-                f"No {wanted_kind} with {c.level_min_touches}+ rejections")
 
     # --- 3. the trigger candle  [p36-37] ----------------------------------
     prev, cur = bars_ltf[-2], bars_ltf[-1]
@@ -451,7 +518,8 @@ def scan(ticker: str,
             f"8/20/50 EMA stack agrees ({ema_direction})")
     else:
         sig.conditions_missing.append(
-            f"EMA stack says {ema_direction}, trend says {sig.direction}")
+            f"EMA stack says {ema_direction}, against this "
+            f"{sig.direction} setup")
 
     # --- 6. is the entry price trustworthy?  [FIX 2026-09-14] -------------
     #

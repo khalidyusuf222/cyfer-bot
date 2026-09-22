@@ -88,7 +88,7 @@ Once the new bot has run fine for a day:
 | `!version` | Which code is running, broker, data source, AI on/off |
 | `!update` | Shows what's waiting on GitHub; changes nothing |
 | `!update yes` | Pulls, checks, restarts |
-| `./update.sh` | The same, from the VPS console |
+| `bash update.sh` | The same, from the VPS console |
 
 ---
 

@@ -325,6 +325,143 @@ def test_scored_conditions_are_consistent():
     print("PASS  every condition lands in exactly one list")
 
 
+# ---------------------------------------------------------------------------
+# Holding a level  [p44]  — the live EUR/USD alert, 2026-09-22
+# ---------------------------------------------------------------------------
+#
+# The alert read support 1.14527 as "at support" with price at 1.14426 —
+# ten pips BELOW it. The stop, placed just under the level, then sat 7.1 pips
+# from entry, reward-to-risk read 6.0:1, and two conditions ticked green for
+# the wrong reason. These tests use those exact prices.
+
+LIVE_SUPPORT = 1.14527
+LIVE_PRICE = 1.14426
+
+
+def fx_range(low=1.14557, high=1.14900, legs=8, per_leg=6, wick=0.0003):
+    """A ranging EUR/USD chart whose swing lows cluster at `low - wick`."""
+    points = [high if i % 2 == 0 else low for i in range(legs + 1)]
+    out, idx = [], 0
+    for a, b in zip(points, points[1:]):
+        for k in range(per_leg):
+            p = a + (b - a) * (k + 1) / per_leg
+            out.append(bar(p - wick * 0.6, p + wick, p - wick, p, idx))
+            idx += 1
+    return out
+
+
+def fx_ltf(end, n=8, step=0.00002):
+    closes = [end + step * (n - 1 - i) for i in range(n)]
+    return [bar(c + 0.00002, c + 0.00006, c - 0.00006, c, i)
+            for i, c in enumerate(closes)]
+
+
+def test_price_below_support_is_not_holding_it():
+    lvl = cyfer.Level(LIVE_SUPPORT, "support", 5)
+    assert not cyfer.holding(lvl, LIVE_PRICE)
+    assert cyfer.at_level([lvl], LIVE_PRICE, "support") is None
+    print(f"PASS  price {LIVE_PRICE} is not 'at' support {LIVE_SUPPORT} "
+          f"— it's under it")
+
+
+def test_price_above_support_still_counts():
+    """The fix must not break the case the strategy is actually for."""
+    lvl = cyfer.Level(LIVE_SUPPORT, "support", 5)
+    above = LIVE_SUPPORT + 0.00040
+    assert cyfer.holding(lvl, above)
+    assert cyfer.at_level([lvl], above, "support") is lvl
+    print("PASS  price just above support still reads as holding it")
+
+
+def test_a_tiny_poke_through_is_tolerated():
+    """A close a hair through the level hasn't broken it yet."""
+    lvl = cyfer.Level(LIVE_SUPPORT, "support", 5)
+    poke = LIVE_SUPPORT * (1 - CONFIG.cyfer.level_break_pct / 100 * 0.5)
+    assert cyfer.holding(lvl, poke)
+    print(f"PASS  a close within {CONFIG.cyfer.level_break_pct}% through "
+          f"the level is still holding")
+
+
+def test_resistance_mirrors_it():
+    lvl = cyfer.Level(1.15000, "resistance", 4)
+    assert cyfer.holding(lvl, 1.14950)
+    assert not cyfer.holding(lvl, 1.15100)
+    print("PASS  price above resistance isn't holding it either")
+
+
+def test_a_holding_level_can_never_give_a_squeezed_stop():
+    """
+    The guarantee the fix buys. Anything that passes the holding check
+    puts price at most level_break_pct through the level, and the stop sits
+    stop_buffer_pct beyond it — so the stop is always at least the
+    difference away. On EUR/USD that's about 11 pips, not 7.
+    """
+    y = CONFIG.cyfer
+    lvl = cyfer.Level(LIVE_SUPPORT, "support", 5)
+    worst = LIVE_SUPPORT * (1 - y.level_break_pct / 100) + 1e-9
+    assert cyfer.holding(lvl, worst)
+    stop = LIVE_SUPPORT - LIVE_SUPPORT * y.stop_buffer_pct / 100
+    pips = (worst - stop) / 0.0001
+    floor = LIVE_SUPPORT * (y.stop_buffer_pct - y.level_break_pct) / 100 / 0.0001
+    assert pips >= floor - 0.01, (pips, floor)
+    assert pips > 10, pips
+    print(f"PASS  worst-case stop on a holding level is {pips:.1f} pips "
+          f"(was 7.1 on the live alert)")
+
+
+def test_live_alert_no_longer_claims_support():
+    """The exact alert, rebuilt. It must not tick 'at support' or R:R."""
+    sig = cyfer.scan("EUR_USD", fx_range(), fx_ltf(LIVE_PRICE),
+                     ema_direction="bearish")
+    met = " ".join(sig.conditions_met)
+    assert "At support" not in met, sig.conditions_met
+    assert "Reward-to-risk" not in met, sig.conditions_met
+    assert sig.entry == 0 or abs(sig.entry - sig.stop) / 0.0001 > 10, \
+        (sig.entry, sig.stop)
+    print(f"PASS  live alert rebuilt: no false 'at support', no squeezed "
+          f"stop ({sig.score}/{sig.total}, read as {sig.direction})")
+
+
+def test_broken_support_is_named_as_broken():
+    """When the check fails, say WHY — not just 'not at support'."""
+    sig = cyfer.scan("EUR_USD", fx_range(), fx_ltf(LIVE_PRICE))
+    joined = " ".join(sig.conditions_missing)
+    assert "has broken" in joined, sig.conditions_missing
+    print("PASS  a broken support is reported as broken")
+
+
+def test_no_trend_direction_is_explained_not_silent():
+    """
+    With no trend there used to be a silent default to bullish. Now the
+    alert states where the direction came from — and when it's a guess,
+    it says so.
+    """
+    sig = cyfer.scan("EUR_USD", fx_range(), fx_ltf(LIVE_PRICE))
+    notes = " ".join(sig.notes)
+    assert "No trend to follow" in notes, sig.notes
+    assert "guess" in notes, sig.notes
+    print("PASS  with no trend, the alert says how it chose a direction")
+
+
+def test_no_trend_at_resistance_reads_bearish():
+    """A range sitting under its ceiling is a bearish read, not a
+    bullish setup that's missing its support."""
+    bars = fx_range()
+    top = max(b.high for b in bars)
+    sig = cyfer.scan("EUR_USD", bars, fx_ltf(top - 0.00010))
+    assert sig.direction == "bearish", (sig.direction, sig.notes)
+    assert any("resistance" in n for n in sig.notes), sig.notes
+    print("PASS  a range at its ceiling reads bearish, from the level")
+
+
+def test_ema_wording_no_longer_invents_a_trend():
+    sig = cyfer.scan("EUR_USD", fx_range(), fx_ltf(LIVE_PRICE),
+                     ema_direction="bullish")
+    text = " ".join(sig.conditions_missing + sig.conditions_met)
+    assert "trend says" not in text, text
+    print("PASS  the EMA line no longer claims a trend that isn't there")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:
