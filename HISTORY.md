@@ -175,6 +175,56 @@ came up, and the rollback if it didn't, never ran. Now:
   `update.log`. Whichever bot is running afterwards posts the result in
   Discord.
 
+**23 Sep (night): back to the book.** The owner shared the Cyfer guide
+again and asked for the bot to be made better, with risk high enough to
+make £1,000 a week. Reading the code against the guide found two places
+where the code had drifted from it, and both help explain the no-edge
+result:
+
+1. **Trades didn't need the book's setup.** Any 3 of 6 conditions was
+   enough. But "2:1 reward" could never fail (see 2), and "no break of
+   structure against" almost never does. So price near a line was enough to
+   trade, with no trend and no trigger candle. Now a trade needs all of
+   trend, level and trigger (`require_core`). The score still decides
+   which alerts are posted.
+2. **Targets went through the next level.** The target was the further of
+   the next level and 2:1, so it was always at least 2:1, and often beyond
+   the very level the strategy expects to turn price back. The book (p51)
+   puts the target at the next high. Now the target is the next level of
+   either kind (p45: broken support becomes resistance). If that's under
+   2:1, the trade is skipped (`target_at_next_level`).
+
+Also:
+
+- No new trades after 12:00 New York time on Friday (17:00 UK). Before, 41
+  of 205 backtest trades were closed by the weekend instead of reaching a
+  stop or target.
+- `!backtest 12 compare` replays the old rules, the current ones, and two
+  variations (no break-even, golden hours only) on the same prices. It
+  scores them in R, each trade's result divided by what it risked, so
+  sizing luck doesn't blur the picture. `!backtest 12 older` tests the 12
+  weeks before the recent ones. A rule is only worth keeping if it wins on
+  both.
+- The replay runs about twice as fast (`find_structure_breaks` no longer
+  rescans every swing for every candle; tested to give the same answers).
+- On random prices the new rules still lose (-0.31R a trade over 26 weeks),
+  so the backtest still isn't peeking.
+- `@here` pings only for setups the bot would actually trade, and `!chart`
+  shows forex prices properly (it said "$1.15" for EUR/USD).
+
+**On £1,000 a week.** The risk stayed at 10%, because raising it changes
+nothing: UK leverage law (30:1) caps every trade first. Checked with the
+sizer: at 10% or 50%, a £1,000 account risks about £35 on a 15-pip stop,
+£47 on 20, £70 on 30 and £94 on 40, and only a 50-pip stop gets £100 or a
+bit more. A 2:1 win is therefore about £70 to £190. £1,000 a week would need
+roughly 8 to 14 more wins than losses every week. The book's rules find a
+few trades a week. The honest route is still the one from 23 Sep: prove an
+edge on the backtest and on demo, then trade a bigger or funded account.
+
+**Not done yet: news.** The book (p62-65) says to sit out high-impact news.
+The bot has no economic calendar, so it can't. That needs a calendar feed
+and is the next thing worth adding.
+
 ---
 
 ## Standing decisions
@@ -185,7 +235,8 @@ came up, and the rollback if it didn't, never ran. Now:
 | Risk 10% a trade, daily cap 20% | The owner's call on 23 Sep. The book says 0.5 to 1%. |
 | Trades too big for UK leverage are cut, not skipped | The owner wants the trades to happen. OANDA would reject them at full size anyway. |
 | One position per pair | Stops one idea from stacking up hour after hour. |
-| Alert from 2/6, trade from 3/6 | Lowered for paper testing. Raise them before live. |
+| Alert from 2/6, trade from 3/6, and only with trend + level + trigger | The score was lowered for paper testing. The book's three were made required on 23 Sep, after the first backtest found no edge. |
+| Target at the next level, skip under 2:1 | The book (p51). The old target went past the next level. |
 | AI is veto-only and off by default | It must never open, resize or loosen anything. |
 | Updates only via GitHub and `!update` | The owner keeps control of the server. Claude never gets server access. |
 | Sizing uses a fixed £1,000, not the live balance | Simple and predictable. At 10% it means risk stays at £100 even after losses. |
@@ -214,11 +265,15 @@ came up, and the rollback if it didn't, never ran. Now:
 
 1. Delete `migrate.sh`. The owner can then delete the old
    `/root/tjr-discord-bot` folder on the server.
-2. The first backtest found no edge (see 23 Sep, evening). Decide what to
-   change before trusting the strategy, and backtest again.
-3. Before any live trading: raise the score thresholds and review the risk
+2. The first backtest found no edge (see 23 Sep, evening). The rules were
+   brought back to the book (23 Sep, night). Next: run
+   `!backtest 12 compare`, then `!backtest 12 compare older`, and keep
+   only what wins on both.
+3. Add an economic calendar so the bot can sit out high-impact news
+   (book p62-65).
+4. Before any live trading: raise the score thresholds and review the risk
    setting.
-4. Turning on the AI reviewer needs a Groq key, which the owner puts into
+5. Turning on the AI reviewer needs a Groq key, which the owner puts into
    `.env` on the server himself. See AI-SETUP.md.
 
 ---

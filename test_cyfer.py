@@ -209,14 +209,108 @@ def test_double_bottom_detected():
 # Risk  [p47-48]
 # ---------------------------------------------------------------------------
 
+def full_setup(**kw):
+    """A hand-built signal with the book's trend, level and trigger."""
+    return cyfer.Signal("X", "bullish", level=cyfer.Level(99.5, "support", 3),
+                        trend_ok=True, trigger_ok=True, **kw)
+
+
 def test_minimum_reward_to_risk_is_two():
     """[p48] 'a minimum 1:2 ratio'."""
     assert CONFIG.cyfer.min_risk_reward == 2.0
-    good = cyfer.Signal("X", "bullish", entry=100, stop=99, target=102)
-    poor = cyfer.Signal("X", "bullish", entry=100, stop=99, target=100.5)
+    good = full_setup(entry=100, stop=99, target=102)
+    poor = full_setup(entry=100, stop=99, target=100.5)
     assert good.rr == 2.0 and good.tradeable
     assert poor.rr == 0.5 and not poor.tradeable
     print("PASS  2:1 minimum enforced — 0.5:1 is refused")
+
+
+def test_a_trade_needs_trend_level_and_trigger():
+    """[p39-48] The book's trade is all three. Missing any one: no order."""
+    assert CONFIG.cyfer.require_core
+    assert full_setup(entry=100, stop=99, target=102).tradeable
+    for missing in ({"trend_ok": False}, {"trigger_ok": False},
+                    {"level": None}):
+        args = {"level": cyfer.Level(99.5, "support", 3),
+                "trend_ok": True, "trigger_ok": True, **missing}
+        sig = cyfer.Signal("X", "bullish", entry=100, stop=99, target=102,
+                           **args)
+        assert not sig.tradeable, missing
+        assert sig.core_missing, missing
+    print("PASS  no trend, no level or no trigger means no trade")
+
+
+def test_require_core_off_restores_the_old_rule():
+    from config import override
+    bare = cyfer.Signal("X", "bullish", entry=100, stop=99, target=102)
+    assert not bare.tradeable
+    with override(cyfer={"require_core": False}):
+        assert bare.tradeable
+    assert not bare.tradeable                  # and it's put back
+    print("PASS  require_core=False trades on the price levels alone")
+
+
+def _levels_scan(levels, price, bullish=True, **cfg):
+    """Run scan() with find_levels and the trend read pinned."""
+    from unittest.mock import patch
+    from config import override
+    trend = cyfer.TrendState("uptrend" if bullish else "downtrend", "test")
+    ltf = series([price] * 6)
+    with override(cyfer=cfg) if cfg else override(), \
+            patch("cyfer.find_levels", lambda *a, **k: levels), \
+            patch("cyfer.trend_state", lambda *a, **k: trend):
+        return cyfer.scan("X", zigzag([100, 110] * 4), ltf)
+
+
+def test_target_is_the_next_level_not_past_it():
+    """[p51] 'My GREEN box (TP) extends to the next high.'"""
+    sup = cyfer.Level(100.0, "support", 3)
+    res = cyfer.Level(104.0, "resistance", 3)
+    sig = _levels_scan([sup, res], 100.2)
+    assert sig.target == 104.0, sig.target
+    assert sig.rr >= 2, sig.rr
+    assert any("next level" in c for c in sig.conditions_met), sig.conditions_met
+    print(f"PASS  target sits on the next level ({sig.rr:.1f}:1)")
+
+
+def test_a_level_too_close_means_no_trade():
+    """The old code aimed through it. Now under 2:1 to the wall = skip."""
+    sup = cyfer.Level(100.0, "support", 3)
+    res = cyfer.Level(100.5, "resistance", 3)
+    sig = _levels_scan([sup, res], 100.2)
+    assert sig.target == 100.5 and sig.rr < 2, (sig.target, sig.rr)
+    assert not sig.tradeable
+    assert any("below the 2:1" in c for c in sig.conditions_missing)
+    old = _levels_scan([sup, res], 100.2, target_at_next_level=False)
+    assert old.target > 100.5 and old.rr >= 2, (old.target, old.rr)
+    print(f"PASS  next level at {sig.rr:.1f}:1 is refused; the old rule "
+          f"aimed past it at {old.target:.2f}")
+
+
+def test_broken_support_above_counts_as_the_next_wall():
+    """[p45] Support can turn into resistance. It's in the way too."""
+    sup = cyfer.Level(100.0, "support", 3)
+    old_floor = cyfer.Level(101.0, "support", 3)   # broken, now overhead
+    far = cyfer.Level(106.0, "resistance", 3)
+    sig = _levels_scan([sup, old_floor, far], 100.2)
+    assert sig.target == 101.0, sig.target
+    print("PASS  a broken support overhead is treated as resistance")
+
+
+def test_shorts_target_the_next_level_below():
+    res = cyfer.Level(100.0, "resistance", 3)
+    sup = cyfer.Level(96.0, "support", 3)
+    sig = _levels_scan([res, sup], 99.8, bullish=False)
+    assert sig.direction == "bearish" and sig.target == 96.0, \
+        (sig.direction, sig.target)
+    print("PASS  a short targets the next level down")
+
+
+def test_no_level_in_the_way_falls_back_to_two_to_one():
+    sup = cyfer.Level(100.0, "support", 3)
+    sig = _levels_scan([sup], 100.2)
+    assert abs(sig.rr - CONFIG.cyfer.min_risk_reward) < 1e-9, sig.rr
+    print("PASS  open road above: target at the 2:1 minimum")
 
 
 def test_breakeven_moves_the_stop_to_entry():
@@ -309,7 +403,7 @@ def test_signal_never_claims_to_predict():
     sig = cyfer.scan("X", bars, series([133, 133.5, 134]))
     text = cyfer.format_signal(sig)
     assert "not a prediction" in text
-    assert "backtested" in text
+    assert "!backtest" in text
     print("PASS  the alert says plainly that it isn't a prediction")
 
 
@@ -460,6 +554,34 @@ def test_ema_wording_no_longer_invents_a_trend():
     text = " ".join(sig.conditions_missing + sig.conditions_met)
     assert "trend says" not in text, text
     print("PASS  the EMA line no longer claims a trend that isn't there")
+
+
+def _old_structure_breaks(bars, swings):
+    """The original, slow version, kept here to check the fast one."""
+    out = []
+    for i, b in enumerate(bars):
+        ph = [s for s in swings if s.kind == "high" and s.index < i]
+        pl = [s for s in swings if s.kind == "low" and s.index < i]
+        if ph and b.close > ph[-1].price:
+            out.append(strategy.StructureBreak(i, "bullish", ph[-1].price, b.close))
+        if pl and b.close < pl[-1].price:
+            out.append(strategy.StructureBreak(i, "bearish", pl[-1].price, b.close))
+    return strategy._dedupe_breaks(out)
+
+
+def test_fast_structure_breaks_match_the_original():
+    import random
+    rng = random.Random(7)
+    for trial in range(40):
+        p, bars = 100.0, []
+        for i in range(200):
+            o, p = p, p + rng.gauss(0, 0.5)
+            bars.append(bar(o, max(o, p) + rng.random() * 0.3,
+                            min(o, p) - rng.random() * 0.3, p, i))
+        sw = strategy.find_swings(bars)
+        assert strategy.find_structure_breaks(bars, sw) == \
+            _old_structure_breaks(bars, sw), trial
+    print("PASS  the faster break-of-structure finder gives identical answers")
 
 
 if __name__ == "__main__":

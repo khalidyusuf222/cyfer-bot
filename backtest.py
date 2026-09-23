@@ -1,10 +1,12 @@
 """
 Backtest — what this bot would have done on past prices.
 
-    venv/bin/python3 backtest.py          # the last 12 weeks
-    venv/bin/python3 backtest.py 26       # the last 26 weeks
+    venv/bin/python3 backtest.py                # the last 12 weeks
+    venv/bin/python3 backtest.py 26             # the last 26 weeks
+    venv/bin/python3 backtest.py 12 compare     # old rules vs new, side by side
+    venv/bin/python3 backtest.py 12 older       # the 12 weeks before those
 
-Or in Discord:  !backtest   /   !backtest 26
+Or in Discord:  !backtest   /   !backtest 26   /   !backtest 12 compare
 
 HOW IT WORKS
 ------------
@@ -67,6 +69,20 @@ HTF_MINUTES, LTF_MINUTES = 60, 5
 HTF_WINDOW, LTF_WINDOW = 200, 60          # exactly what the live scan asks for
 
 DEFAULT_WEEKS, MAX_WEEKS = 12, 52
+MAX_COMPARE_WEEKS = 16            # download + four replays inside 15 minutes
+
+# ---------------------------------------------------------------------------
+# Rule sets for `compare`. Each is a set of config changes, replayed on the
+# SAME downloaded prices, so the only difference between rows is the rules.
+# ---------------------------------------------------------------------------
+VARIANTS = [
+    ("Rules before 23 Sep", {
+        "cyfer": {"require_core": False, "target_at_next_level": False},
+        "sessions": {"friday_last_entry": "16:00"}}),
+    ("Current settings", {}),
+    ("Current, no break-even", {"cyfer": {"breakeven_enabled": False}}),
+    ("Current, golden hours only", {"sessions": {"golden_hours_only": True}}),
+]
 
 
 # ===========================================================================
@@ -523,6 +539,11 @@ def summarise(res: Result) -> dict:
         k = tuple(t.closed.date().isocalendar()[:2])
         weekly[k] = weekly.get(k, 0.0) + t.pnl_gbp
 
+    # R: each trade's result divided by what it risked. Trade sizes vary a
+    # lot (the leverage cut, free margin), so pounds mix the strategy up
+    # with sizing luck. R scores every trade on the same scale.
+    rs = [t.pnl_gbp / t.risk_gbp for t in closed if t.risk_gbp > 0]
+
     avg_win = sum(wins) / len(wins) if wins else 0.0
     avg_loss = -sum(losses) / len(losses) if losses else 0.0
     be = avg_loss / (avg_win + avg_loss) if (avg_win + avg_loss) else None
@@ -551,6 +572,7 @@ def summarise(res: Result) -> dict:
         "pnl": sum(pnls), "avg_win": avg_win, "avg_loss": avg_loss,
         "profit_factor": (sum(wins) / -sum(losses)) if losses else None,
         "expectancy": sum(pnls) / len(pnls) if pnls else 0.0,
+        "r_total": sum(rs), "r_mean": sum(rs) / len(rs) if rs else None,
         "max_drawdown": dd, "worst_streak": worst_streak,
         "per_week": len(closed) / span_weeks,
         "weekly": [weekly[k] for k in sorted(weekly)],
@@ -626,6 +648,10 @@ def report(res: Result, requested_weeks: Optional[int] = None) -> str:
         f"Result: **{gbp(s['pnl'])}** "
         f"({s['pnl'] / acct * 100:+.1f}% of the account)",
     ]
+    if s["r_mean"] is not None:
+        lines.append(f"In R: **{s['r_total']:+.1f}R**, "
+                     f"{s['r_mean']:+.2f}R a trade *(R = the amount each "
+                     f"trade risked, so sizing doesn't blur the picture)*")
     if s["weekly"]:
         lines.append(f"Average week {gbp(s['pnl'] / max(s['weeks'], 1e-9))} · "
                      f"best {gbp(max(s['weekly']))} · "
@@ -693,6 +719,73 @@ def report(res: Result, requested_weeks: Optional[int] = None) -> str:
         "*Past prices, not a forecast. The spread is charged both ways, but "
         "fills are otherwise ideal, and a candle touching both levels "
         "counts as a stop. None of the rules were tuned on this data.*",
+    ]
+    return "\n".join(lines)
+
+
+def compare(history: dict, start: Optional[datetime] = None,
+            variants=None, log=None) -> list[tuple[str, dict]]:
+    """Replay each rule set on the same prices. [(name, summary), ...]"""
+    from config import override
+    out = []
+    for name, changes in (variants or VARIANTS):
+        if log:
+            log(f"replaying: {name} …")
+        with override(**changes):
+            res = run(history, start=start)
+        out.append((name, summarise(res)))
+    return out
+
+
+def compare_report(rows: list[tuple[str, dict]], weeks: int,
+                   older: bool = False) -> str:
+    def gbp(x: float) -> str:
+        return f"{'+' if x >= 0 else '−'}£{abs(x):,.0f}"
+
+    first = next((s for _, s in rows if s["start"]), None)
+    when = (f"{first['start']:%d %b} → {first['end']:%d %b %Y}"
+            if first else "no data")
+    lines = [f"**Compare — {weeks} weeks{' (the older stretch)' if older else ''}**",
+             f"Same OANDA prices for every row, {when}. Only the rules change.",
+             ""]
+    for name, s in rows:
+        lines.append(f"**{name}**")
+        if not s["trades"]:
+            lines += ["No trades.", ""]
+            continue
+        wr = f"{s['win_rate']:.0%}" if s["win_rate"] is not None else "–"
+        need = (f" (needs {s['breakeven_rate']:.0%})"
+                if s["breakeven_rate"] is not None else "")
+        r = (f"{s['r_mean']:+.2f}R a trade, {s['r_total']:+.1f}R total"
+             if s["r_mean"] is not None else "")
+        low = (f" · lowest £{s['lowest_equity']:,.0f}"
+               if s["lowest_equity"] is not None else "")
+        pf = (f" · profit factor {s['profit_factor']:.2f}"
+              if s["profit_factor"] is not None else "")
+        lines += [f"{s['trades']} trades ({s['per_week']:.1f} a week) · "
+                  f"win rate {wr}{need}",
+                  f"{gbp(s['pnl'])} · {r}{pf}{low}", ""]
+
+    scored = [(n, s) for n, s in rows
+              if s["trades"] >= CONFIG.review.min_trades_to_diagnose
+              and s["r_mean"] is not None]
+    if scored:
+        best_name, best = max(scored, key=lambda x: x[1]["r_mean"])
+        lines.append(f"Best per trade on these weeks: **{best_name}** "
+                     f"({best['r_mean']:+.2f}R).")
+    else:
+        lines.append(f"No row has {CONFIG.review.min_trades_to_diagnose}+ "
+                     f"trades, so none can be judged yet. Try more weeks.")
+    lines += [
+        "",
+        "*Judge rows by R a trade, not pounds. A rule that wins here has to "
+        "win again on weeks it wasn't picked on before it's trusted: run "
+        "`!backtest " + str(weeks) + " compare older` for the "
+        + str(weeks) + " weeks before these.*"
+        if not older else
+        "*This is the older stretch. A rule that won on the recent weeks "
+        "AND here is worth keeping. One that only won once was probably "
+        "luck.*",
     ]
     return "\n".join(lines)
 
@@ -786,28 +879,61 @@ def fetch(weeks: int, now: Optional[datetime] = None, log=print) -> tuple:
     return history, start
 
 
+def parse_args(args: list[str]) -> tuple[int, bool, bool]:
+    """(weeks, compare, older) from e.g. ["12", "compare", "older"]."""
+    weeks, cmp_, older = DEFAULT_WEEKS, False, False
+    for a in args:
+        a = a.strip().lower()
+        if a in ("compare", "cmp", "vs"):
+            cmp_ = True
+        elif a in ("older", "before", "earlier"):
+            older = True
+        elif a:
+            try:
+                weeks = int(a)
+            except ValueError:
+                raise ValueError(f"'{a}' isn't a number of weeks, "
+                                 f"'compare' or 'older'.")
+    weeks = max(1, min(weeks, MAX_COMPARE_WEEKS if cmp_ else MAX_WEEKS))
+    return weeks, cmp_, older
+
+
 def main(argv: list[str]) -> int:
     try:
-        weeks = int(argv[1]) if len(argv) > 1 else DEFAULT_WEEKS
-    except ValueError:
-        print(f"Weeks must be a number, not '{argv[1]}'.", file=sys.stderr)
+        weeks, cmp_, older = parse_args(argv[1:])
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
         return 2
-    weeks = max(1, min(weeks, MAX_WEEKS))
 
     def log(msg):
         print(msg, file=sys.stderr, flush=True)
 
+    # "older" tests the same length of time, just before the recent one:
+    # weeks the rules weren't chosen on.
+    now = datetime.now(timezone.utc)
+    if older:
+        now -= timedelta(weeks=weeks)
     try:
-        history, start = fetch(weeks, log=log)
+        history, start = fetch(weeks, now=now, log=log)
     except Exception as e:  # noqa: BLE001 — explain it, don't dump a trace
         print(f"Couldn't fetch the price history from OANDA.\n{e}",
               file=sys.stderr)
         return 1
 
+    if cmp_:
+        print(compare_report(compare(history, start=start, log=log),
+                             weeks, older))
+        return 0
+
     log("replaying …")
     res = run(history, start=start,
               progress=lambda i, n: log(f"  {i / max(n, 1):.0%}"))
-    print(report(res, weeks))
+    text = report(res, weeks)
+    if older:
+        text = text.replace(f"last {weeks} weeks",
+                            f"{weeks} weeks, the stretch before the last "
+                            f"{weeks}", 1)
+    print(text)
     return 0
 
 

@@ -346,6 +346,10 @@ class Signal:
     conditions_met: list[str] = field(default_factory=list)
     conditions_missing: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # The two parts of the book's core setup that aren't the level itself.
+    # Set by scan(); a hand-built Signal has neither.
+    trend_ok: bool = False
+    trigger_ok: bool = False
 
     @property
     def score(self) -> int:
@@ -373,9 +377,29 @@ class Signal:
         return (self.reward_per_share / r) if r > 0 else 0.0
 
     @property
+    def core_missing(self) -> list[str]:
+        """Which of the book's three (trend, level, trigger) aren't here."""
+        out = []
+        if not self.trend_ok:
+            out.append("trend")
+        if self.level is None:
+            out.append("level")
+        if not self.trigger_ok:
+            out.append("trigger candle")
+        return out
+
+    @property
     def tradeable(self) -> bool:
-        return (self.entry > 0 and self.stop > 0 and self.target > 0
-                and self.rr >= CONFIG.cyfer.min_risk_reward)
+        """
+        May an order be placed on this? Priced, at least 2:1 [p48], and
+        (with require_core on) the book's trend, level and trigger all
+        present [p39-48]. The score only decides what gets posted.
+        """
+        priced = (self.entry > 0 and self.stop > 0 and self.target > 0
+                  and self.rr >= CONFIG.cyfer.min_risk_reward)
+        if not priced:
+            return False
+        return not (CONFIG.cyfer.require_core and self.core_missing)
 
 
 def scan(ticker: str,
@@ -444,6 +468,7 @@ def scan(ticker: str,
                          f"{direction} because {why}.")
 
     # --- 1. trend  [p39-41] ------------------------------------------------
+    sig.trend_ok = trend.is_trending
     if trend.is_trending:
         sig.conditions_met.append(
             f"Trend: **{trend.kind}** ({trend.basis})")
@@ -485,9 +510,11 @@ def scan(ticker: str,
     rej = wick_rejection(cur)
 
     if eng == sig.direction:
+        sig.trigger_ok = True
         sig.conditions_met.append(
             f"{eng.title()} engulfing candle — body engulfs the previous")
     elif rej == sig.direction:
+        sig.trigger_ok = True
         sig.conditions_met.append(
             f"Wick rejection {rej} — price pushed through and was pushed back")
     elif is_doji(cur):
@@ -550,27 +577,42 @@ def scan(ticker: str,
         buffer = level.price * c.stop_buffer_pct / 100
         sig.entry = price
 
-        if sig.direction == "bullish":
-            # [p44] stops just beyond the level
-            sig.stop = level.price - buffer
+        bullish = sig.direction == "bullish"
+        # [p44] stops just beyond the level
+        sig.stop = level.price - buffer if bullish else level.price + buffer
+        risk = abs(price - sig.stop)
+        measured = (price + risk * c.min_risk_reward if bullish
+                    else price - risk * c.min_risk_reward)
+
+        in_the_way = None
+        if c.target_at_next_level:
+            # [p51] the target is the next level; [p45] of either kind,
+            # because a broken support is the next resistance
+            if bullish:
+                ahead = [l for l in levels if l.price > max(price, level.price)]
+                in_the_way = min(ahead, key=lambda l: l.price, default=None)
+            else:
+                ahead = [l for l in levels if l.price < min(price, level.price)]
+                in_the_way = max(ahead, key=lambda l: l.price, default=None)
+            sig.target = in_the_way.price if in_the_way else measured
+        elif bullish:
             opposing = nearest_level(
                 [l for l in levels if l.price > price], price, "resistance")
-            measured = price + (price - sig.stop) * c.min_risk_reward
             sig.target = max(opposing.price, measured) if opposing else measured
         else:
-            sig.stop = level.price + buffer
             opposing = nearest_level(
                 [l for l in levels if l.price < price], price, "support")
-            measured = price - (sig.stop - price) * c.min_risk_reward
             sig.target = min(opposing.price, measured) if opposing else measured
 
+        to = (f" to the next level `{fmt(in_the_way.price, ticker)}`"
+              if in_the_way else "")
         if sig.rr >= c.min_risk_reward:
             sig.conditions_met.append(
-                f"Reward-to-risk {sig.rr:.1f}:1 (minimum "
+                f"Reward-to-risk {sig.rr:.1f}:1{to} (minimum "
                 f"{c.min_risk_reward:.0f}:1)")
         else:
             sig.conditions_missing.append(
-                f"Reward-to-risk only {sig.rr:.1f}:1, below the "
+                f"Reward-to-risk only {sig.rr:.1f}:1{to}, below the "
                 f"{c.min_risk_reward:.0f}:1 minimum the book sets")
     else:
         sig.conditions_missing.append(
@@ -657,6 +699,11 @@ def format_signal(sig: Signal, session_note: str = "") -> str:
             f"{fmt(sig.stop, t)}`",
         ]
 
+    if (sig.entry and CONFIG.cyfer.require_core and sig.core_missing):
+        lines += ["", f"Won't be auto-traded: no "
+                      f"{' or '.join(sig.core_missing)}. The book's trade "
+                      f"needs a trend, a level and a trigger candle."]
+
     if session_note:
         lines += ["", session_note]
 
@@ -665,7 +712,7 @@ def format_signal(sig: Signal, session_note: str = "") -> str:
 
     lines.append(
         "\n*Conditions present on the chart, not a prediction. The book "
-        "defines the parts; the way they're combined here is a choice, and "
-        "neither has been backtested.*")
+        "defines the parts; the way they're combined here is a choice. "
+        "`!backtest` shows how these rules did on past prices.*")
 
     return "\n".join(lines)

@@ -141,6 +141,31 @@ class CyferParams:
     # [CHOICE] Minimum higher-timeframe bars before the scan will run.
     min_htf_bars: int = 40
 
+    # ---------------------------------------------------------------------
+    # [FIX 2026-09-23] The first backtest (205 trades, 12 weeks) found no
+    # edge. Two reasons, both places where the code had drifted from the
+    # book. Each is a switch, so the backtest can compare old and new rules
+    # on the same prices (`!backtest 12 compare`).
+    #
+    # require_core: [BOOK p39-48] the book's trade is a trend, a level and
+    # a trigger candle, at 2:1 or better. Scoring any 3 of 6 let the bot
+    # trade with none of the trend, the trigger or the EMA: price near a
+    # line was enough, because the 2:1 condition could never fail (see
+    # below) and "no break of structure against" almost never does. Now
+    # all three must be present before an order is placed. The score still
+    # decides which alerts are posted.
+    require_core: bool = True
+
+    # target_at_next_level: [BOOK p51] "My GREEN box (TP) extends to the
+    # next high." [BOOK p45] support turns into resistance and vice versa,
+    # so any level on the far side is in the way. [BOOK p48] a trade must
+    # offer 2:1. The old code set the target at the FURTHER of the next
+    # level and 2:1, which pushed targets through the level the strategy
+    # itself expects to turn price back, and made 2:1 impossible to fail.
+    # Now the target is the next level, and if that's under 2:1 the trade
+    # is skipped. With no level in the way it falls back to 2:1.
+    target_at_next_level: bool = True
+
     # [BOOK p45] Higher timeframes take precedence — they filter the noise.
     # Trend and levels come from the first; the trigger from the second.
     htf: str = "1Hour"
@@ -262,6 +287,13 @@ class SessionParams:
 
     entry_window_start: str = "03:00"   # London opens
     entry_window_end: str = "16:00"     # an hour before the day rolls over
+
+    # [CHOICE 2026-09-23] No new trades after this on a Friday. Entries used
+    # to run to 16:00, half an hour before everything is closed for the
+    # weekend, and in the first backtest 41 of 205 trades (one in five)
+    # were cut off by the weekend close instead of reaching their stop or
+    # target. Midday New York is 17:00 UK.
+    friday_last_entry: str = "12:00"
 
     # [CHOICE] No entries in the first stretch after the Sunday open. The
     # book does not say this; it is the same judgement as the old equity
@@ -458,6 +490,38 @@ class Config:
 CONFIG = Config()
 
 
+class override:
+    """
+    Temporarily change settings, then put them back:
+
+        with override(cyfer={"require_core": False}):
+            ...
+
+    The backtest's compare mode uses it to replay old and new rules on
+    the same prices. Every module reads CONFIG.<section>.<name> when it
+    runs, not when it's imported, so swapping a section is seen everywhere.
+    Never used by the live bot.
+    """
+
+    def __init__(self, **sections):
+        self.sections = sections
+        self.saved: dict = {}
+
+    def __enter__(self):
+        import dataclasses
+        for name, changes in self.sections.items():
+            current = getattr(CONFIG, name)
+            self.saved[name] = current
+            object.__setattr__(CONFIG, name,
+                               dataclasses.replace(current, **changes))
+        return CONFIG
+
+    def __exit__(self, *exc):
+        for name, original in self.saved.items():
+            object.__setattr__(CONFIG, name, original)
+        return False
+
+
 def parameter_report() -> str:
     """Shown on !params — so the choices are never invisible."""
     y, r, s = CONFIG.cyfer, CONFIG.risk, CONFIG.sessions
@@ -467,6 +531,10 @@ def parameter_report() -> str:
         f"• Minimum reward-to-risk `{y.min_risk_reward:.0f}:1` *(p48)*\n"
         f"• Risk per trade `{r.risk_per_trade_pct}%` *(p53: 0.5–1%)*\n"
         f"• Stop to break-even at `{y.breakeven_at_r:.0f}R` *(p47)*\n"
+        f"• Trades need trend + level + trigger: "
+        f"`{'on' if y.require_core else 'off'}` *(p39-48)*\n"
+        f"• Target at the next level, skip if under 2:1: "
+        f"`{'on' if y.target_at_next_level else 'off'}` *(p45, p51)*\n"
         f"• Higher timeframe `{y.htf}` leads, `{y.ltf}` triggers *(p45)*\n\n"
         "**Numbers the book describes but never quantifies — my choices:**\n"
         f"• Swing strength: `{CONFIG.strategy.swing_strength}` bars either side\n"
@@ -483,7 +551,8 @@ def parameter_report() -> str:
         f"• Entries `{s.entry_window_start}`-`{s.entry_window_end}` ET "
         f"(London through New York); golden hours "
         f"`{s.golden_start}`-`{s.golden_end}` *(p3)*\n"
-        f"• Flat by `{s.weekend_flatten}` ET Friday - the weekend gap\n\n"
+        f"• No new trades after `{s.friday_last_entry}` ET Friday · "
+        f"flat by `{s.weekend_flatten}` ET - the weekend gap\n\n"
         "*Change any of these and the signals change. That is the point — "
         "the results are yours to prove, not the book's to claim.*"
     )

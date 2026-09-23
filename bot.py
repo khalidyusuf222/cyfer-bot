@@ -226,9 +226,11 @@ async def _scan_ticker(ticker: str, channel, state) -> None:
     elif not first_alert:
         return                      # already told Bob about this one
 
+    # @here only for a setup the bot would actually trade. A 3/6 without
+    # the book's trend, level and trigger is posted quietly.
     await channel.send(
-        content="@here" if setup.score >= CONFIG.strategy.min_auto_score
-        else None,
+        content="@here" if (setup.score >= CONFIG.strategy.min_auto_score
+                            and setup.tradeable) else None,
         embed=embed(f"Setup — {ticker}",
                     cyfer.format_signal(
                         setup,
@@ -1270,8 +1272,11 @@ async def cmd_auto(ctx, setting: str = None):
     await ctx.send(embed=embed(
         "Auto-execute ON",
         f"{execution.describe_mode(conn)}\n\n"
-        f"Orders fire from **{CONFIG.strategy.min_auto_score}/6 conditions** "
-        f"(not all six), inside the session window, and only if every risk "
+        f"Orders fire from **{CONFIG.strategy.min_auto_score}/6 conditions**"
+        + (", and only with the book's three: a trend, a level and a "
+           "trigger candle, with 2:1 or better to the next level"
+           if CONFIG.cyfer.require_core else " (not all six)")
+        + f". Only inside the session window, and only if every risk "
         f"gate passes.\n\n"
         + ("🔴 **This spends real money.** `!halt` stops everything."
            if live else
@@ -1591,16 +1596,21 @@ async def cmd_chart(ctx, ticker: str = None):
         price = bars_ltf[-1].close
         near = sorted(levels, key=lambda l: abs(l.price - price))[:4]
         lines += ["", f"**Levels on the {y.htf} chart** "
-                      f"(price ${price:,.2f})"]
+                      f"(price `{cyfer.fmt(price, tick)}`)"]
         for l in near:
-            lines.append(f"• {l.kind} ${l.price:,.2f} — {l.touches} "
-                         f"rejections, {l.distance_pct(price):.2f}% away")
+            lines.append(f"• {l.kind} `{cyfer.fmt(l.price, tick)}` — "
+                         f"{l.touches} rejections, "
+                         f"{l.distance_pct(price):.2f}% away")
 
     lines += ["", f"Alert at **{s.min_alert_score}/{sig.total}** · "
                   f"auto-trade at **{s.min_auto_score}/{sig.total}**"]
 
     if sig.score >= s.min_auto_score and sig.tradeable:
         lines.append("→ This **would** be traded right now.")
+    elif sig.score >= s.min_auto_score and y.require_core and sig.core_missing:
+        lines.append(f"→ Score is high enough, but there's no "
+                     f"{' or '.join(sig.core_missing)}. The book's trade "
+                     f"needs a trend, a level and a trigger candle.")
     elif sig.score >= s.min_auto_score:
         lines.append(f"→ Score is high enough but the trade isn't priceable "
                      f"(reward-to-risk {sig.rr:.1f}:1).")
@@ -1973,9 +1983,11 @@ _backtest_running = False
 
 
 @bot.command(name="backtest", aliases=["bt"])
-async def cmd_backtest(ctx, weeks: str = None):
+async def cmd_backtest(ctx, *args: str):
     """
-    !backtest [weeks] — replay the strategy over past OANDA prices.
+    !backtest [weeks] [compare] [older] — replay the strategy over past
+    OANDA prices. `compare` replays the old and current rules side by side
+    on the same prices; `older` uses the stretch before the recent one.
 
     Runs backtest.py as a SEPARATE program rather than inside the bot. It
     runs the strategy tens of thousands of times, and doing that in here
@@ -1994,27 +2006,34 @@ async def cmd_backtest(ctx, weeks: str = None):
         return
 
     try:
-        n = int(weeks) if weeks else bt.DEFAULT_WEEKS
-    except ValueError:
+        n, cmp_, older = bt.parse_args(list(args))
+    except ValueError as e:
         await ctx.send(embed=embed(
-            "That didn't work", f"`!backtest 12` — weeks as a number, not "
-            f"'{weeks}'.", "warn"))
+            "That didn't work", f"{e}\n\nFor example `!backtest 12`, "
+            f"`!backtest 12 compare` or `!backtest 12 older`.", "warn"))
         return
-    n = max(1, min(n, bt.MAX_WEEKS))
 
     _backtest_running = True
     try:
+        which = (f"the {n} weeks before the last {n}" if older
+                 else f"the last {n} weeks")
+        what = (f"then replaying {len(bt.VARIANTS)} sets of rules on the "
+                f"same prices, to compare them"
+                if cmp_ else
+                "then replaying the strategy five minutes at a time, "
+                "exactly as the live bot would have traded it")
         await ctx.send(embed=embed(
-            f"Backtest running — last {n} weeks",
-            f"Fetching {n} weeks of OANDA prices for all four pairs, then "
-            f"replaying the strategy five minutes at a time, exactly as the "
-            f"live bot would have traded it.\n\n"
-            f"Usually takes a few minutes. The live bot keeps running "
-            f"normally while this works.", "info"))
+            f"Backtest running — {which}" + (" · compare" if cmp_ else ""),
+            f"Fetching {n} weeks of OANDA prices for all four pairs, "
+            f"{what}.\n\n"
+            f"Usually takes a few minutes"
+            f"{' (compare takes longer)' if cmp_ else ''}. The live bot "
+            f"keeps running normally while this works.", "info"))
 
         here = Path(__file__).parent
+        extra = (["compare"] if cmp_ else []) + (["older"] if older else [])
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, str(here / "backtest.py"), str(n),
+            sys.executable, str(here / "backtest.py"), str(n), *extra,
             cwd=str(here),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
@@ -2120,6 +2139,8 @@ async def cmd_help(ctx):
         "`!sync` — ask OANDA how the open trades ended\n"
         "`!mx` — benchmark table · `!review` — full weekly review\n"
         "`!backtest` — how it would have done over the last 12 weeks\n"
+        "`!backtest 12 compare` — old rules vs current, same prices\n"
+        "`!backtest 12 older` — the 12 weeks before that\n"
         "`!ai` — what the AI reviewer blocked · `!lessons` — the journal\n\n"
         "**Checking**\n"
         "`!chart` — live scan: why it is or isn't trading\n"
@@ -2132,12 +2153,14 @@ async def cmd_help(ctx):
         "*Long names still work: `!bought`, `!positions`, `!session`.*\n\n"
         "**The strategy**\n"
         "Trend → level → trigger. Trade with the trend, at a level price "
-        "has respected 3+ times, on a rejection candle, for 2:1 or "
-        "better — long or short.\n\n"
+        "has respected 3+ times, on a rejection candle, with 2:1 or "
+        "better to the next level — long or short. All three must be "
+        "there before it trades.\n\n"
         "**The clock**\n"
         "Forex runs 24/5. Entries 08:00–21:00 UK, best between 13:00 and "
-        "17:00 UK when London and New York are both open. Flat by 21:30 "
-        "UK on Friday. Daily summary 22:05 UK.",
+        "17:00 UK when London and New York are both open. No new trades "
+        "after 17:00 UK on Friday; flat by 21:30 UK. Daily summary "
+        "22:05 UK.",
         "info"))
 
 

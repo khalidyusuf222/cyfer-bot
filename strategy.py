@@ -99,17 +99,28 @@ def find_structure_breaks(bars: Sequence[Bar],
     sw = list(swings) if swings is not None else find_swings(bars)
     out: list[StructureBreak] = []
 
-    for i, bar in enumerate(bars):
-        prior_highs = [s for s in sw if s.kind == "high" and s.index < i]
-        prior_lows = [s for s in sw if s.kind == "low" and s.index < i]
+    # The latest swing high and low before each bar, found by walking both
+    # lists once. It used to rebuild them for every bar, which made this
+    # over half the backtest's running time. Same answers, tested against
+    # the old version in test_cyfer.py.
+    highs = sorted((s for s in sw if s.kind == "high"), key=lambda s: s.index)
+    lows = sorted((s for s in sw if s.kind == "low"), key=lambda s: s.index)
+    hi = lo = 0
+    last_high = last_low = None
 
-        if prior_highs:
-            level = prior_highs[-1].price
+    for i, bar in enumerate(bars):
+        while hi < len(highs) and highs[hi].index < i:
+            last_high, hi = highs[hi], hi + 1
+        while lo < len(lows) and lows[lo].index < i:
+            last_low, lo = lows[lo], lo + 1
+
+        if last_high is not None:
+            level = last_high.price
             if bar.close > level:                       # body close, not wick
                 out.append(StructureBreak(i, "bullish", level, bar.close))
 
-        if prior_lows:
-            level = prior_lows[-1].price
+        if last_low is not None:
+            level = last_low.price
             if bar.close < level:
                 out.append(StructureBreak(i, "bearish", level, bar.close))
 

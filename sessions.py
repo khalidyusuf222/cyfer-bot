@@ -172,12 +172,15 @@ def current_state(now: datetime | None = None) -> SessionState:
             centres, golden)
 
     # --- Friday run-out ---------------------------------------------------
-    if now_et.weekday() == s.week_close_day and t >= _t(s.entry_window_end):
+    # [CHOICE 2026-09-23] friday_last_entry: a trade opened late on Friday
+    # rarely has time to reach its target before the weekend close.
+    last = getattr(s, "friday_last_entry", s.entry_window_end)
+    if now_et.weekday() == s.week_close_day and t >= _t(last):
         return SessionState(
             now_et, now_uk, "runout", False,
-            f"Friday past {s.entry_window_end} ET - no new positions into "
-            f"the weekend. Everything open is closed at "
-            f"{s.weekend_flatten} ET.",
+            f"Friday past {last} ET - no new positions into the weekend, "
+            f"because a trade opened now rarely has time to reach its "
+            f"target. Everything open is closed at {s.weekend_flatten} ET.",
             centres, golden)
 
     # --- the golden hours  [BOOK p3] --------------------------------------

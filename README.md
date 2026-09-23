@@ -2,7 +2,8 @@
 
 A forex trading bot for Discord, built on the strategy in the Cyfer Academy
 trading guide: trade with the trend, at a level price has respected three or
-more times, on a rejection candle, for at least twice the risk.
+more times, on a rejection candle, with at least twice the risk to the next
+level. It only trades when all of that is there.
 
 It watches **EUR/USD, GBP/USD, USD/JPY and AUD/USD** on an OANDA account,
 posts setups to a Discord channel, and — if you switch it on — places the
@@ -85,6 +86,12 @@ See `UPDATING.md`. Short version: upload changed files here, then type
 strategy over OANDA's own price history, five minutes at a time, using the
 live bot's own code for every decision. It runs as a separate program, so
 it can't slow the live bot down, and it never touches the trade database.
+
+`!backtest 12 compare` replays the rules from before 23 Sep 2026 next to
+the current ones (and two variations) on the same prices, scored in R: each
+trade's result divided by what it risked. `!backtest 12 older` runs the 12
+weeks before the most recent 12, to check that a rule which won once wins
+again on weeks it wasn't chosen on.
 
 Its most important test runs it on pure random prices, where no strategy
 can have an edge: there, it must lose. It does — which is how you know it

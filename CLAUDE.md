@@ -52,7 +52,7 @@ Tests are plain functions, **not** pytest or unittest. Run every file:
 
 Each file prints "All N tests passed." (`python -m unittest` finds 0 tests
 and says OK, which proves nothing.) All tests run offline. Currently
-there are about 295 across 15 files. Run them all before every push.
+there are about 310 across 15 files. Run them all before every push.
 
 ## Current settings (config.py)
 
@@ -66,19 +66,32 @@ there are about 295 across 15 files. Run them all before every push.
   are **cut to fit, not skipped** (`risk.size_trade`, `capped`). The live
   bot reads free margin from OANDA, so a second open trade only gets what's
   left. In the first backtest every trade was cut, and the real risk
-  averaged £14.54, not £100.
+  averaged £14.54, not £100. Raising the percentage does nothing at £1,000:
+  the leverage cap binds first (about £35 to £95 a trade, depending on the
+  stop). The owner wants £1,000 a week; the honest answer is in HISTORY.md
+  (23 Sep, night).
 - Account size for sizing is fixed at `display.account_gbp` (£1,000), not
   the live balance.
-- Alerts from score 2/6, auto-trades from 3/6.
+- Alerts from score 2/6, auto-trades from 3/6, and only when the book's
+  trend, level and trigger candle are all there (`cyfer.require_core`).
+- Target is the next level of either kind. If that's under 2:1, no trade
+  (`cyfer.target_at_next_level`). Both switches came in on 23 Sep, after the
+  first backtest found no edge. `!backtest 12 compare` replays old and new
+  rules side by side.
+- No new trades after 12:00 New York time on Friday
+  (`sessions.friday_last_entry`).
 - AI reviewer (Groq, `openai/gpt-oss-120b`): **veto only**, off unless
   `AI_ENABLED` is set in `.env`. It can block a trade and nothing else.
   It must never be able to open, resize or loosen anything.
 
 ## Backtest
 
-`!backtest [weeks]` (default 12, max 52) runs `backtest.py` as a separate
-process on the server, using OANDA's own candles. It calls the live code
-(`cyfer.scan`, `sessions`, `risk.size_trade`, `oanda.validate_levels`).
+`!backtest [weeks] [compare] [older]` (default 12, max 52, compare max 16)
+runs `backtest.py` as a separate process on the server, using OANDA's own
+candles. `compare` replays `backtest.VARIANTS` on the same prices using
+`config.override`; `older` tests the stretch before the recent one. It
+calls the live code (`cyfer.scan`, `sessions`, `risk.size_trade`,
+`oanda.validate_levels`).
 
 - No look-ahead. It enters at the next candle's open plus half the spread.
 - A candle touching both the stop and the target counts as a stop.
@@ -111,8 +124,10 @@ the server.
 
 1. Delete `migrate.sh` (a one-off from the rename). Remind the owner that the
    old folder on the server can be removed.
-2. The first `!backtest` found no edge (details in HISTORY.md, 23 Sep).
-   Work out with the owner what to change, then backtest again.
+2. Read `!backtest 12 compare` and `!backtest 12 compare older` with the
+   owner. Keep only rule changes that win on both stretches.
+3. Add an economic calendar so the bot sits out high-impact news
+   (book p62-65). There's none yet.
 
 ## How the owner likes answers
 

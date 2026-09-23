@@ -128,6 +128,22 @@ def test_friday_still_trades_during_the_day():
     print("PASS  Friday still trades up to the run-out")
 
 
+def test_no_new_trades_after_friday_midday():
+    """
+    [CHOICE 2026-09-23] One trade in five in the first backtest was cut off
+    by the weekend close. Entries now stop at friday_last_entry.
+    """
+    last = CONFIG.sessions.friday_last_entry
+    h, m = map(int, last.split(":"))
+    assert sessions.current_state(et(*FRIDAY, h, m) - timedelta(minutes=1)).can_enter
+    s = sessions.current_state(et(*FRIDAY, h, m))
+    assert not s.can_enter and s.phase == "runout", s.reason
+    assert last in s.reason
+    # Thursday is untouched
+    assert sessions.current_state(et(2026, 9, 17, 14)).can_enter
+    print(f"PASS  no new trades after {last} ET on Friday; Thursday unchanged")
+
+
 def test_entries_span_london_through_new_york():
     open_hours = [h for h in range(24)
                   if sessions.current_state(et(*MONDAY, h)).can_enter]

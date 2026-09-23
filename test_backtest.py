@@ -82,6 +82,9 @@ def signal(direction, entry, stop_pips, rr=2.0, score=3):
     s.target = entry + sgn * stop_pips * PIP * rr
     s.conditions_met = [f"c{i}" for i in range(score)]
     s.conditions_missing = [f"m{i}" for i in range(6 - score)]
+    # the book's three, so the stand-in is a setup the bot would trade
+    s.trend_ok = s.trigger_ok = True
+    s.level = cyfer.Level(s.stop, "support" if sgn > 0 else "resistance", 3)
     return s
 
 
@@ -411,28 +414,16 @@ def test_the_report_reads_cleanly():
 # The honesty check
 # ---------------------------------------------------------------------------
 
-def test_no_edge_on_pure_coin_flip_prices():
-    """
-    The test that matters most. On a random walk with no trend at all, no
-    strategy can have an edge, so after the spread the average trade MUST
-    come out negative. A backtest that finds profit in pure randomness is
-    peeking at the future somewhere — and would lie about real results too.
-
-    Runs the REAL strategy, not a stand-in. Fixed seed, so it's repeatable.
-    Measured at -0.13R a trade when written; the bar here is deliberately
-    loose (below +0.15R) so a future strategy change can't trip it by
-    chance, while a genuine look-ahead leak — which shows up as a large
-    edge — still would.
-    """
+def coin_flip_history(weeks, seed=1000):
+    """Four pairs of pure random-walk prices, 5-minute and hourly."""
     import random
-    import statistics
     import sessions
 
-    rng = random.Random(1000)
+    rng = random.Random(seed)
     specs = {"EUR_USD": (1.15, 0.00025), "GBP_USD": (1.34, 0.00030),
              "USD_JPY": (150.0, 0.030), "AUD_USD": (0.66, 0.00020)}
     end = datetime(2026, 9, 19, tzinfo=UTC)
-    start = end - timedelta(weeks=8)
+    start = end - timedelta(weeks=weeks)
 
     def walk(p0, vol):
         m5, t, p = [], start - timedelta(days=16), p0
@@ -453,13 +444,109 @@ def test_no_edge_on_pure_coin_flip_prices():
               for k, v in sorted(buckets.items())]
         return {"htf": h1, "ltf": m5}
 
-    res = bt.run({s: walk(*v) for s, v in specs.items()}, start=start)
-    r = [t.pnl_gbp / t.risk_gbp for t in res.closed if t.risk_gbp]
-    assert len(r) > 50, len(r)
-    mean = statistics.mean(r)
-    assert mean < 0.15, f"found an edge in random prices: {mean:+.3f}R"
-    print(f"PASS  {len(r)} trades on coin-flip prices average {mean:+.3f}R "
-          f"— no edge in randomness, so no peeking")
+    return {s: walk(*v) for s, v in specs.items()}, start
+
+
+OLD_RULES = dict(bt.VARIANTS)["Rules before 23 Sep"]
+
+
+def test_no_edge_on_pure_coin_flip_prices():
+    """
+    The test that matters most. On a random walk with no trend at all, no
+    strategy can have an edge, so after the spread the average trade MUST
+    come out negative. A backtest that finds profit in pure randomness is
+    peeking at the future somewhere — and would lie about real results too.
+
+    Runs the REAL strategy, not a stand-in. Fixed seed, so it's repeatable.
+    The bar is deliberately loose (below +0.15R) so a future strategy change
+    can't trip it by chance, while a genuine look-ahead leak — which shows
+    up as a large edge — still would.
+
+    Twice: the current rules over 26 weeks (they're strict, so they need
+    the time to trade enough — measured -0.31R over 60 trades when
+    written), and the old, looser rules over 8 weeks (-0.13R over 170).
+    """
+    import statistics
+    from config import override
+
+    for label, weeks, changes, need in (("current rules", 26, {}, 40),
+                                        ("old rules", 8, OLD_RULES, 50)):
+        hist, start = coin_flip_history(weeks)
+        with override(**changes):
+            res = bt.run(hist, start=start)
+        r = [t.pnl_gbp / t.risk_gbp for t in res.closed if t.risk_gbp]
+        assert len(r) > need, (label, len(r))
+        mean = statistics.mean(r)
+        assert mean < 0.15, f"{label} found an edge in random prices: {mean:+.3f}R"
+        print(f"PASS  {label}: {len(r)} trades on coin-flip prices average "
+              f"{mean:+.3f}R — no edge in randomness, so no peeking")
+
+
+# ---------------------------------------------------------------------------
+# Compare mode
+# ---------------------------------------------------------------------------
+
+def test_compare_replays_every_rule_set_and_puts_the_settings_back():
+    from config import CONFIG as C
+    before = (C.cyfer, C.sessions)
+    seen = []
+
+    def fake_run(history, start=None, progress=None):
+        seen.append((C.cyfer.require_core, C.cyfer.breakeven_enabled,
+                     C.sessions.golden_hours_only))
+        return bt.Result(trades=[], start=None, end=None, pairs=["EUR_USD"])
+
+    with patch("backtest.run", fake_run):
+        rows = bt.compare({}, start=T0)
+    assert [n for n, _ in rows] == [n for n, _ in bt.VARIANTS]
+    assert seen[0][0] is False                 # old rules: no core rule
+    assert seen[1] == (True, True, False)      # current settings
+    assert seen[2][1] is False                 # no break-even
+    assert seen[3][2] is True                  # golden hours only
+    assert (C.cyfer, C.sessions) == before, "settings weren't put back"
+    print("PASS  compare replays each rule set, then restores the settings")
+
+
+def test_compare_report_reads_cleanly():
+    fake, _ = firing(every=True)
+    price = lambda k: 1.1 + max(0, k - steps_to(T0)) * 2 * PIP
+    with patch("cyfer.scan", fake):
+        rows = bt.compare(history(price), start=T0)
+    text = bt.compare_report(rows, 12)
+    for name, _ in bt.VARIANTS:
+        assert name in text, name
+    assert "R a trade" in text and "compare older" in text, text
+    assert "<" not in text
+    older = bt.compare_report(rows, 12, older=True)
+    assert "older stretch" in older
+    print("PASS  the compare report names every row and says how to check it")
+
+
+def test_report_shows_results_in_r():
+    times = {T0 + timedelta(minutes=5)}
+    fake, _ = firing(times, stop_pips=20)
+    start = steps_to(T0 + timedelta(minutes=5))
+    price = lambda k: 1.1 + max(0, k - start) * 2 * PIP     # climbs to target
+    res = run_with(fake, history(price))
+    s = bt.summarise(res)
+    assert s["r_mean"] is not None and 1.8 < s["r_mean"] < 2.0, s["r_mean"]
+    assert "In R:" in bt.report(res, 1)
+    print(f"PASS  a 2:1 winner reads as {s['r_mean']:+.2f}R after the spread")
+
+
+def test_backtest_arguments():
+    assert bt.parse_args([]) == (bt.DEFAULT_WEEKS, False, False)
+    assert bt.parse_args(["26"]) == (26, False, False)
+    assert bt.parse_args(["12", "compare", "older"]) == (12, True, True)
+    assert bt.parse_args(["compare"]) == (bt.DEFAULT_WEEKS, True, False)
+    assert bt.parse_args(["52", "compare"])[0] == bt.MAX_COMPARE_WEEKS
+    assert bt.parse_args(["99"])[0] == bt.MAX_WEEKS
+    try:
+        bt.parse_args(["lots"])
+        raise AssertionError("accepted 'lots'")
+    except ValueError as e:
+        assert "lots" in str(e)
+    print("PASS  !backtest reads weeks, compare and older in any order")
 
 
 # ---------------------------------------------------------------------------
@@ -614,7 +701,7 @@ def test_a_failed_download_prints_a_plain_message():
     import contextlib
     import oanda
 
-    def broken(weeks, log=print):
+    def broken(weeks, now=None, log=print):
         raise oanda.OandaServerError(
             "OANDA error 504: " + oanda._explain(type("R", (), {
                 "status_code": 504, "text": "<!DOCTYPE html><html></html>",
