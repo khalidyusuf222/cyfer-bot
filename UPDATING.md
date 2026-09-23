@@ -19,6 +19,11 @@ broken it **refuses to restart and puts the previous files back**. The bot
 keeps running on the old version, and will still boot cleanly after a
 reboot. You're told exactly what broke.
 
+If the new code parses but then crashes, the bot is put back on the
+previous version and restarted, and Discord tells you it was rolled back.
+The update runs separately from the bot (`journalctl -u cyferbot-update`
+shows it), so restarting the bot doesn't cut it off halfway.
+
 ---
 
 ## One-time setup

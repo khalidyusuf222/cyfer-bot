@@ -12,9 +12,10 @@ trades itself with the stop and target attached at the broker.
 
 ## What it is not
 
-**It has never been backtested.** The guide defines the parts; the way
-they're combined here is a choice, marked `[CHOICE]` in the code everywhere
-it appears. Nothing the bot reports should be read as proof the strategy
+**It isn't proven.** The guide defines the parts; the way they're combined
+here is a choice, marked `[CHOICE]` in the code everywhere it appears.
+`!backtest` shows how it would have done on past prices, which is evidence,
+not a promise. Nothing the bot reports should be read as proof the strategy
 works until there are enough closed trades to say so — the review command
 refuses to draw conclusions below 20.
 
@@ -63,6 +64,7 @@ default. See `AI-SETUP.md`.
 | `reconcile.py` | Asks the broker how each trade actually ended |
 | `review.py`, `metrics.py` | The weekly review, with error bars |
 | `ai.py`, `ai_log.py` | The optional AI reviewer |
+| `backtest.py` | Replays the strategy over past OANDA prices — `!backtest` |
 | `update.sh` | Pull new code and restart safely |
 
 Settings and secrets live in `.env`, which is **never** committed —
@@ -76,6 +78,17 @@ See `UPDATING.md`. Short version: upload changed files here, then type
 `!update yes` in Discord.
 
 ---
+
+## Backtest
+
+`!backtest` in Discord (or `!backtest 26` for 26 weeks) replays the
+strategy over OANDA's own price history, five minutes at a time, using the
+live bot's own code for every decision. It runs as a separate program, so
+it can't slow the live bot down, and it never touches the trade database.
+
+Its most important test runs it on pure random prices, where no strategy
+can have an edge: there, it must lose. It does — which is how you know it
+isn't secretly peeking at future candles.
 
 ## Tests
 

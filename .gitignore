@@ -25,7 +25,8 @@ __pycache__/
 .venv/
 venv/
 
-# Local scratch
+# Local scratch. update.log and update.status are written by update.sh.
 *.log
+update.status
 *.tar.gz
 *.zip

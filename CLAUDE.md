@@ -31,10 +31,17 @@ at OANDA.
 3. `update.sh` fetches, resets to `origin/main`, refuses anything that
    doesn't parse, and restarts the systemd service `cyferbot`
    (folder `/root/cyfer-bot`, virtualenv `venv`). Logs: `journalctl -u cyferbot`.
+   `!update yes` starts it with `systemd-run` as its own unit
+   (`cyferbot-update`), so it survives the restart. If the bot doesn't stay
+   up for 20 seconds, it puts the old code back. It writes progress to
+   `update.status` and output to `update.log`, and the bot that's running
+   afterwards posts the result (`updater.py`).
 4. `!version` shows the running commit.
 
 Always tell the owner in plain words what you're about to push, and wait
-for a yes, before pushing. The owner never gives Claude server access,
+for a yes, before pushing. Once they say yes, push straight to `main`, not
+to a side branch or a pull request (the owner's instruction, 23 Sep). The
+server only pulls from `main`. The owner never gives Claude server access,
 and Claude shouldn't ask for it.
 
 ## Tests
@@ -45,7 +52,7 @@ Tests are plain functions, **not** pytest or unittest. Run every file:
 
 Each file prints "All N tests passed." (`python -m unittest` finds 0 tests
 and says OK, which proves nothing.) All tests run offline. Currently
-there are about 285 across 14 files. Run them all before every push.
+there are about 295 across 15 files. Run them all before every push.
 
 ## Current settings (config.py)
 
@@ -58,7 +65,8 @@ there are about 285 across 14 files. Run them all before every push.
   otherwise (AUD/USD). The sizer uses 90% of that. Trades that are too big
   are **cut to fit, not skipped** (`risk.size_trade`, `capped`). The live
   bot reads free margin from OANDA, so a second open trade only gets what's
-  left. At 10% risk most trades end up risking roughly £20 to £80, not £100.
+  left. In the first backtest every trade was cut, and the real risk
+  averaged £14.54, not £100.
 - Account size for sizing is fixed at `display.account_gbp` (£1,000), not
   the live balance.
 - Alerts from score 2/6, auto-trades from 3/6.
@@ -101,15 +109,10 @@ the server.
 
 ## To do
 
-1. **Fix `!update` from Discord.** Restarting the service kills `update.sh`,
-   because the script runs inside the bot's own cgroup (the group of
-   processes systemd stops together). So the check that the bot came back
-   up, and the rollback if it didn't, never run. Fix: start the script with
-   `systemd-run --unit=cyferbot-update --collect ...` so it runs as its own
-   unit and survives the restart.
-2. Delete `migrate.sh` (a one-off from the rename). Remind the owner that the
+1. Delete `migrate.sh` (a one-off from the rename). Remind the owner that the
    old folder on the server can be removed.
-3. Read the owner's first `!backtest` result with them.
+2. The first `!backtest` found no edge (details in HISTORY.md, 23 Sep).
+   Work out with the owner what to change, then backtest again.
 
 ## How the owner likes answers
 

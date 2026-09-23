@@ -143,6 +143,38 @@ first download (100 days of hourly candles in one request) with a 504
 Reads are retried. Orders never are, because sending one twice would open
 two trades.
 
+**23 Sep (evening): the first backtest result. No edge.** `!backtest`
+with the default 12 weeks (1 Jul to 23 Sep):
+
+| | |
+| :-- | :-- |
+| Trades | 205 |
+| How they ended | 37 hit the target, 96 hit the stop, 31 break-even, 41 closed for the weekend |
+| Win rate | 36%, where breaking even needs 39% |
+| Result | -£196 |
+| Profit factor | 0.87 (money won ÷ money lost; below 1 means losing) |
+| Low point | £547, on 26 Aug |
+| Real risk per trade | £14.54 on average |
+
+- Every trade was cut down to fit the UK leverage limit, so the 10% setting
+  (£100) never actually applied. The real risk averaged £14.54, about 1.5%.
+- Over these 12 weeks, the strategy as coded has no edge. It lost slowly
+  because the trades were small, not because it works.
+
+**23 Sep (evening): `!update` fixed.** Restarting the bot also killed
+`update.sh`, because the script ran inside the bot's own group of
+processes, which systemd stops together. So the check that the new code
+came up, and the rollback if it didn't, never ran. Now:
+
+- `!update yes` starts `update.sh` with `systemd-run` as its own unit,
+  `cyferbot-update`, so it survives the restart.
+- The script waits 20 seconds after the restart and checks the bot is
+  still up and hasn't crashed and restarted. If it has, the old code is put
+  back and restarted.
+- The script writes its progress to `update.status` and its output to
+  `update.log`. Whichever bot is running afterwards posts the result in
+  Discord.
+
 ---
 
 ## Standing decisions
@@ -180,15 +212,13 @@ two trades.
 
 ## Still open
 
-1. `!update` from Discord doesn't run the check that the bot came back up,
-   or the rollback if it didn't. The service restart kills `update.sh`.
-   Fix it with `systemd-run` (details in CLAUDE.md).
-2. Delete `migrate.sh`. The owner can then delete the old
+1. Delete `migrate.sh`. The owner can then delete the old
    `/root/tjr-discord-bot` folder on the server.
-3. The first `!backtest` result hasn't been seen yet.
-4. Before any live trading: raise the score thresholds and review the risk
+2. The first backtest found no edge (see 23 Sep, evening). Decide what to
+   change before trusting the strategy, and backtest again.
+3. Before any live trading: raise the score thresholds and review the risk
    setting.
-5. Turning on the AI reviewer needs a Groq key, which the owner puts into
+4. Turning on the AI reviewer needs a Groq key, which the owner puts into
    `.env` on the server himself. See AI-SETUP.md.
 
 ---

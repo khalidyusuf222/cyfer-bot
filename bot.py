@@ -53,6 +53,7 @@ import risk
 import sessions
 import cyfer
 import tracker
+import updater
 from config import CONFIG, parameter_report
 
 logging.basicConfig(level=logging.INFO,
@@ -125,6 +126,10 @@ async def on_ready():
             f"`!help` for commands · `!chart` for a live scan.",
             "good" if ok else "urgent",
         ))
+
+    if channel:
+        # In the background, so waiting on update.sh can't delay the scans.
+        asyncio.create_task(_report_update(channel))
 
     if not scan_loop.is_running():
         scan_loop.start()
@@ -1265,8 +1270,9 @@ async def cmd_auto(ctx, setting: str = None):
     await ctx.send(embed=embed(
         "Auto-execute ON",
         f"{execution.describe_mode(conn)}\n\n"
-        f"Orders fire only on **6/6 conditions**, inside the session window, "
-        f"and only if every risk gate passes.\n\n"
+        f"Orders fire from **{CONFIG.strategy.min_auto_score}/6 conditions** "
+        f"(not all six), inside the session window, and only if every risk "
+        f"gate passes.\n\n"
         + ("🔴 **This spends real money.** `!halt` stops everything."
            if live else
            "Paper money — nothing real at risk."),
@@ -1845,36 +1851,84 @@ async def cmd_update(ctx, confirm: str = None):
         return
 
     await ctx.send(embed=embed(
-        "Updating…", "Pulling, checking the code parses, then restarting. "
-        "Back in about 10 seconds.", "info"))
+        "Updating…", "Pulling, checking the code parses, restarting, then "
+        "checking the new code stays up. The result arrives in about 30 "
+        "seconds.", "info"))
 
+    # [FIX 2026-09-23] Started as its own systemd unit, not as a child of
+    # this process. The restart kills everything in the bot's own group,
+    # and that used to include update.sh before it could check the new
+    # code came up or roll it back. See updater.py.
+    updater.clear()
     try:
-        result = await asyncio.to_thread(
-            subprocess.run, ["bash", str(here / "update.sh")],
-            capture_output=True, text=True, timeout=180)
+        started = await asyncio.to_thread(
+            subprocess.run, updater.launch_command(here),
+            capture_output=True, text=True, timeout=30)
     except Exception as e:  # noqa: BLE001
-        await ctx.send(embed=embed("Update failed", str(e), "urgent"))
-        return
-
-    tail = ((result.stdout or "") + (result.stderr or "")).strip()[-1500:]
-
-    if result.returncode != 0:
-        # update.sh refuses to restart on a syntax error, so the bot is
-        # still running the OLD code here — which is the safe outcome.
         await ctx.send(embed=embed(
-            "Update refused — still on the old code",
-            f"```\n{tail}\n```\n"
-            f"*Nothing was restarted, and the files were rolled back — the "
-            f"bot is still running the previous version and will boot into "
-            f"it cleanly after a reboot too.*", "urgent"))
+            "Update didn't start", f"{e}\n\nNothing was changed.", "urgent"))
         return
 
-    # If the restart worked, this process is about to be replaced, so the
-    # startup message in Discord is the real confirmation.
+    if started.returncode != 0:
+        why = ((started.stderr or "") + (started.stdout or "")).strip()[-800:]
+        busy = "already" in why.lower()
+        await ctx.send(embed=embed(
+            "Update didn't start",
+            ("Another update is still running. Give it a minute, then "
+             "`!version`." if busy else f"```\n{why}\n```")
+            + "\n\nNothing was changed.", "urgent"))
+        return
+
+    # Wait for an answer that arrives before the restart (up to date, or
+    # refused). If the restart happens, this process ends here, and the
+    # new bot posts the result when it starts (_report_update).
+    for _ in range(60):
+        await asyncio.sleep(2)
+        st = updater.read_status()
+        if st in updater.BEFORE_RESTART:
+            await _post_update_result(ctx.channel, st)
+            return
     await ctx.send(embed=embed(
-        "Updated", f"```\n{tail}\n```\n"
-        f"*Watch for the startup message — that's the new code booting.*",
-        "good"))
+        "Update still going",
+        "No result after two minutes. `!version` shows which code is "
+        "running.", "warn"))
+
+
+_update_checked = False
+
+
+async def _report_update(channel):
+    """Post how the last !update went, once, when the bot starts.
+
+    After a restart, the bot that asked for the update is gone. So the one
+    now running (the new code, or the old code after a rollback) reports.
+    update.sh keeps checking for up to a minute after the restart, so this
+    waits for its final word.
+    """
+    global _update_checked
+    if _update_checked:
+        return
+    _update_checked = True
+
+    for _ in range(60):
+        st = updater.read_status()
+        if st is None:
+            return
+        if st in updater.FINAL:
+            await _post_update_result(channel, st)
+            return
+        await asyncio.sleep(2)
+    await channel.send(embed=embed(
+        "Update result unknown",
+        "The update didn't report back within two minutes. `!version` "
+        "shows which code is running.", "warn"))
+
+
+async def _post_update_result(channel, status: str):
+    title, why, kind = updater.describe(status)
+    updater.clear()
+    await channel.send(embed=embed(
+        title, f"{why}\n```\n{updater.log_tail()}\n```", kind))
 
 
 @bot.command(name="version", aliases=["ver"])
