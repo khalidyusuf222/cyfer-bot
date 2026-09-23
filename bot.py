@@ -1955,7 +1955,7 @@ async def cmd_backtest(ctx, weeks: str = None):
             f"Fetching {n} weeks of OANDA prices for all four pairs, then "
             f"replaying the strategy five minutes at a time, exactly as the "
             f"live bot would have traded it.\n\n"
-            f"Usually under two minutes. The live bot keeps running "
+            f"Usually takes a few minutes. The live bot keeps running "
             f"normally while this works.", "info"))
 
         here = Path(__file__).parent
@@ -1976,6 +1976,16 @@ async def cmd_backtest(ctx, weeks: str = None):
         text = (out or b"").decode("utf-8", "replace").strip()
         if proc.returncode != 0 or not text:
             tail = (err or b"").decode("utf-8", "replace").strip()[-900:]
+            if "OANDA's side" in tail or "answering too slowly" in tail:
+                lines = [l for l in tail.splitlines() if l.strip()]
+                reason = next((l for l in lines if l.startswith("OANDA")),
+                              lines[-1])
+                await ctx.send(embed=embed(
+                    "Backtest couldn't get the prices",
+                    f"{reason}\n\nNothing is wrong with the bot, and live "
+                    f"trading isn't affected. Try `!backtest` again in "
+                    f"about 10 minutes.", "warn"))
+                return
             await ctx.send(embed=embed(
                 "Backtest failed",
                 f"```\n{tail or 'no output'}\n```", "warn"))

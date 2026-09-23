@@ -705,23 +705,56 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Small windows: OANDA's practice server has answered a single 100-day
+# hourly request with a 504 (its gateway gave up waiting). Four days of
+# 5-minute candles is at most 1,152; thirty days of hourly ones 720.
+LTF_STEP, HTF_STEP = timedelta(days=4), timedelta(days=30)
+FETCH_BUDGET_SECONDS = 8 * 60          # the bot kills the job at 15 minutes
+
+
+def _window(sym: str, granularity: str, a: datetime, b: datetime,
+            deadline: float, splits_left: int = 2) -> list:
+    """
+    One window of candles. If OANDA's server fails on it even after the
+    retries, the window is split in half and each half asked for
+    separately - a smaller question is often one it can answer.
+    """
+    import time
+    import oanda
+    if time.monotonic() > deadline:
+        raise oanda.OandaError(
+            "OANDA is answering too slowly right now to download the "
+            "history. Try `!backtest` again later.")
+    try:
+        payload = oanda._get(f"/v3/instruments/{sym}/candles", {
+            "granularity": granularity, "price": "M",
+            "from": _iso(a), "to": _iso(b)}, timeout=30, retries=2)
+    except (oanda.OandaServerError, oanda.MarketError) as e:
+        if isinstance(e, oanda.OandaError) and \
+                not isinstance(e, oanda.OandaServerError):
+            raise                           # bad token etc. - won't fix itself
+        if splits_left <= 0 or (b - a) < timedelta(hours=12):
+            raise
+        mid = a + (b - a) / 2
+        return (_window(sym, granularity, a, mid, deadline, splits_left - 1)
+                + _window(sym, granularity, mid, b, deadline, splits_left - 1))
+    return oanda.parse_candles(payload)
+
+
 def _windowed(sym: str, granularity: str, frm: datetime, to: datetime,
-              step: timedelta) -> list:
+              step: timedelta, deadline: Optional[float] = None) -> list:
     """
     OANDA returns at most 5000 candles per request and won't take `count`
-    with a from/to window, so long histories are fetched in windows small
-    enough to stay under the cap: 14 days of 5-minute candles is at most
-    4,032, 150 days of hourly ones 3,600.
+    with a from/to window, so long histories are fetched window by window.
     """
-    import oanda
+    import time
+    if deadline is None:
+        deadline = time.monotonic() + FETCH_BUDGET_SECONDS
     out, seen = [], set()
     cur = frm
     while cur < to:
         nxt = min(cur + step, to)
-        payload = oanda._get(f"/v3/instruments/{sym}/candles", {
-            "granularity": granularity, "price": "M",
-            "from": _iso(cur), "to": _iso(nxt)})
-        for b in oanda.parse_candles(payload):
+        for b in _window(sym, granularity, cur, nxt, deadline):
             if b.ts not in seen:
                 seen.add(b.ts)
                 out.append(b)
@@ -739,12 +772,14 @@ def fetch(weeks: int, now: Optional[datetime] = None, log=print) -> tuple:
     htf_from = start - timedelta(days=16)
     ltf_from = start - timedelta(days=2)
 
+    import time
+    deadline = time.monotonic() + FETCH_BUDGET_SECONDS
     history = {}
     for sym in CONFIG.instruments.watchlist:
         log(f"fetching {sym} …")
         history[sym] = {
-            "htf": _windowed(sym, "H1", htf_from, now, timedelta(days=150)),
-            "ltf": _windowed(sym, "M5", ltf_from, now, timedelta(days=14)),
+            "htf": _windowed(sym, "H1", htf_from, now, HTF_STEP, deadline),
+            "ltf": _windowed(sym, "M5", ltf_from, now, LTF_STEP, deadline),
         }
         log(f"  {len(history[sym]['htf'])} hourly, "
             f"{len(history[sym]['ltf'])} five-minute candles")
@@ -765,7 +800,7 @@ def main(argv: list[str]) -> int:
     try:
         history, start = fetch(weeks, log=log)
     except Exception as e:  # noqa: BLE001 — explain it, don't dump a trace
-        print(f"Couldn't fetch the price history from OANDA: {e}",
+        print(f"Couldn't fetch the price history from OANDA.\n{e}",
               file=sys.stderr)
         return 1
 

@@ -342,6 +342,86 @@ def test_watchlist_is_all_liquid_majors():
           f"{', '.join(p.display for p in wl)}")
 
 
+# ---------------------------------------------------------------------------
+# When OANDA's servers fail
+# ---------------------------------------------------------------------------
+
+HTML_504 = ('<!DOCTYPE html>\n<html>\n<head>\n<meta charset="utf-8"/>\n'
+            '<title>Internal Server Error</title>\n</head></html>')
+
+
+class _Resp:
+    def __init__(self, status, text="", payload=None):
+        self.status_code, self.text, self._payload = status, text, payload
+        self.ok = 200 <= status < 300
+        self.content = text.encode() if text else b""
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("not json")
+        return self._payload
+
+
+def _fake_get(responses, calls):
+    def fake(url, headers=None, params=None, timeout=None):
+        calls.append(url)
+        return responses.pop(0)
+    return fake
+
+
+def test_an_html_error_page_becomes_one_sentence():
+    msg = oanda._explain(_Resp(504, HTML_504))
+    assert "<" not in msg and "timed out" in msg and "OANDA's side" in msg, msg
+    j = oanda._explain(_Resp(400, '{"errorMessage":"Invalid value"}',
+                             {"errorMessage": "Invalid value"}))
+    assert j == "Invalid value", j
+    print(f"PASS  HTML 504 page → \"{msg[:48]}…\"")
+
+
+def test_a_read_is_retried_after_a_504():
+    from unittest.mock import patch
+    os.environ.setdefault("OANDA_TOKEN", "test-token")
+    calls = []
+    responses = [_Resp(504, HTML_504), _Resp(200, "{}", {"candles": []})]
+    with patch("oanda.requests.get", _fake_get(responses, calls)), \
+         patch("oanda.time.sleep", lambda s: None):
+        out = oanda._get("/v3/instruments/EUR_USD/candles", retries=2)
+    assert out == {"candles": []} and len(calls) == 2, (out, len(calls))
+    print("PASS  a 504 is retried and the second attempt's answer is used")
+
+
+def test_without_retries_a_504_is_a_readable_server_error():
+    from unittest.mock import patch
+    os.environ.setdefault("OANDA_TOKEN", "test-token")
+    calls = []
+    with patch("oanda.requests.get", _fake_get([_Resp(504, HTML_504)], calls)):
+        try:
+            oanda._get("/v3/x")
+        except oanda.OandaServerError as e:
+            text = str(e)
+        else:
+            raise AssertionError("no error raised")
+    assert len(calls) == 1 and "<" not in text and "504" in text, text
+    print("PASS  the live scan doesn't retry, and the error has no HTML in it")
+
+
+def test_a_rejected_token_is_never_retried():
+    from unittest.mock import patch
+    os.environ.setdefault("OANDA_TOKEN", "test-token")
+    calls = []
+    responses = [_Resp(401, "{}", {}), _Resp(200, "{}", {})]
+    with patch("oanda.requests.get", _fake_get(responses, calls)), \
+         patch("oanda.time.sleep", lambda s: None):
+        try:
+            oanda._get("/v3/x", retries=3)
+        except oanda.OandaError as e:
+            assert not isinstance(e, oanda.OandaServerError)
+        else:
+            raise AssertionError("no error raised")
+    assert len(calls) == 1, len(calls)
+    print("PASS  a bad token fails once — asking again can't fix it")
+
+
 if __name__ == "__main__":
     os.environ.setdefault("OANDA_TOKEN", "test")
     os.environ.setdefault("OANDA_ACCOUNT", "001-001-1234567-001")

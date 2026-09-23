@@ -131,6 +131,18 @@ fully automatic trading, not a confirm-first flow.
   make bot changes in Claude Code sessions. The owner still types
   `!update` himself.
 
+**23 Sep (afternoon): first backtest run failed.** OANDA's practice server answered the
+first download (100 days of hourly candles in one request) with a 504
+"timed out" HTML page, and the bot pasted that page into Discord. The fix:
+
+- downloads are now smaller (4 days of 5-minute candles, 30 days of hourly)
+- a failed download is retried
+- a window that still fails is split in half
+- OANDA errors show as one plain sentence
+
+Reads are retried. Orders never are, because sending one twice would open
+two trades.
+
 ---
 
 ## Standing decisions

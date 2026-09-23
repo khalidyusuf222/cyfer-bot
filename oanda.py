@@ -30,6 +30,7 @@ time those paths execute. That is what a practice account is for.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -52,6 +53,14 @@ class OandaError(MarketError):
 
 class TradeNotFound(OandaError):
     """OANDA has never heard of this trade id."""
+
+
+class OandaServerError(OandaError):
+    """
+    OANDA's own servers failed (a 5xx status). Nothing was wrong with the
+    request, so asking again later can work - unlike a bad token or a
+    rejected order, where it never will.
+    """
 
 
 # ===========================================================================
@@ -92,20 +101,72 @@ def _headers() -> dict:
     }
 
 
-def _get(path: str, params: dict | None = None, timeout: int = 20) -> dict:
-    try:
-        r = requests.get(f"{_host()}{path}", headers=_headers(),
-                         params=params or {}, timeout=timeout)
-    except requests.RequestException as e:
-        raise MarketError(f"Network error reaching OANDA: {e}") from e
+_SERVER_TROUBLE = {
+    500: "had an internal error",
+    502: "had a gateway error",
+    503: "is temporarily unavailable",
+    504: "timed out",
+}
 
+# Seconds to wait before each retry of a GET. Only reads are ever retried:
+# sending an order twice would open two trades.
+_RETRY_WAITS = (2, 5, 10, 20)
+
+
+def _explain(r) -> str:
+    """
+    A readable reason for a failed response.
+
+    OANDA's gateway sometimes answers with a whole HTML error page instead
+    of JSON. That used to be pasted straight into Discord. Now it becomes
+    one sentence.
+    """
+    body = (r.text or "").strip()
+    if body[:1] == "<" or "<html" in body[:300].lower():
+        what = _SERVER_TROUBLE.get(r.status_code, "sent back an error page")
+        return (f"OANDA's server {what}. That's on OANDA's side, not the "
+                f"bot's, and it usually clears within a few minutes.")
+    try:
+        msg = (r.json() or {}).get("errorMessage")
+        if msg:
+            return str(msg)[:300]
+    except ValueError:
+        pass
+    return body[:300]
+
+
+def _get(path: str, params: dict | None = None, timeout: int = 20,
+         retries: int = 0) -> dict:
+    """
+    GET from OANDA. `retries` > 0 asks again after a network failure or a
+    5xx, waiting a little longer each time. The live scan leaves it at 0
+    so a slow OANDA can't hold a scan up; the backtest uses it, because
+    one failed download out of a hundred shouldn't sink the whole test.
+    """
+    for attempt in range(retries + 1):
+        last = attempt >= retries
+        try:
+            r = requests.get(f"{_host()}{path}", headers=_headers(),
+                             params=params or {}, timeout=timeout)
+        except requests.RequestException as e:
+            if not last:
+                time.sleep(_RETRY_WAITS[min(attempt, len(_RETRY_WAITS) - 1)])
+                continue
+            raise MarketError(f"Network error reaching OANDA: {e}") from e
+        if r.status_code >= 500 and not last:
+            time.sleep(_RETRY_WAITS[min(attempt, len(_RETRY_WAITS) - 1)])
+            continue
+        break
+
+    if r.status_code >= 500:
+        raise OandaServerError(f"OANDA error {r.status_code}: {_explain(r)}")
     if r.status_code in (401, 403):
         raise OandaError("OANDA rejected the token. Check OANDA_TOKEN and "
                          "that OANDA_ENV matches which token you generated.")
     if r.status_code == 404:
         raise TradeNotFound(f"OANDA returned 404 for {path}")
     if not r.ok:
-        raise OandaError(f"OANDA error {r.status_code}: {r.text[:300]}")
+        raise OandaError(f"OANDA error {r.status_code}: {_explain(r)}")
     return r.json()
 
 
@@ -118,7 +179,7 @@ def _post(path: str, body: dict, timeout: int = 20) -> dict:
     if r.status_code in (401, 403):
         raise OandaError("OANDA rejected the token.")
     if not r.ok:
-        raise OandaError(f"OANDA error {r.status_code}: {r.text[:400]}")
+        raise OandaError(f"OANDA error {r.status_code}: {_explain(r)}")
     return r.json()
 
 
@@ -129,7 +190,7 @@ def _put(path: str, body: dict, timeout: int = 20) -> dict:
     except requests.RequestException as e:
         raise OandaError(f"Network error: {e}") from e
     if not r.ok and r.status_code != 404:
-        raise OandaError(f"OANDA error {r.status_code}: {r.text[:300]}")
+        raise OandaError(f"OANDA error {r.status_code}: {_explain(r)}")
     return r.json() if r.content else {}
 
 

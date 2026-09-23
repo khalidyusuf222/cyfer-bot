@@ -551,6 +551,83 @@ def test_backtest_at_ten_percent_reports_the_real_risk():
           f"made £{tr.pnl_gbp:+.2f}, and the report says so")
 
 
+# ---------------------------------------------------------------------------
+# Downloading the history when OANDA struggles
+# ---------------------------------------------------------------------------
+
+def _hourly_payload(a, b):
+    out, t = [], a
+    while t < b:
+        out.append({"time": _stamp(t), "complete": True,
+                    "mid": {"o": "1.1", "h": "1.1", "l": "1.1", "c": "1.1"},
+                    "volume": 1})
+        t += timedelta(hours=1)
+    return {"candles": out}
+
+
+def test_a_window_oanda_chokes_on_is_split_and_still_arrives_whole():
+    import oanda
+    asked = []
+
+    def fake_get(path, params=None, timeout=20, retries=0):
+        a, b = bt.parse_ts(params["from"]), bt.parse_ts(params["to"])
+        asked.append(b - a)
+        if b - a > timedelta(days=10):
+            raise oanda.OandaServerError("OANDA error 504: OANDA's server "
+                                         "timed out.")
+        return _hourly_payload(a, b)
+
+    a = datetime(2026, 8, 1, tzinfo=UTC)
+    b = a + timedelta(days=30)
+    with patch("oanda._get", fake_get):
+        bars = bt._windowed("EUR_USD", "H1", a, b, timedelta(days=30))
+    assert len(bars) == 30 * 24, len(bars)
+    assert len({x.ts for x in bars}) == len(bars)
+    assert max(asked) == timedelta(days=30) and min(asked) <= timedelta(days=7.5)
+    print(f"PASS  a 30-day window OANDA refused was split into smaller ones "
+          f"— all {len(bars)} hourly candles arrived, none twice")
+
+
+def test_a_bad_token_stops_the_download_without_splitting():
+    import oanda
+    asked = []
+
+    def fake_get(path, params=None, timeout=20, retries=0):
+        asked.append(1)
+        raise oanda.OandaError("OANDA rejected the token.")
+
+    a = datetime(2026, 8, 1, tzinfo=UTC)
+    with patch("oanda._get", fake_get):
+        try:
+            bt._windowed("EUR_USD", "H1", a, a + timedelta(days=30),
+                         timedelta(days=30))
+        except oanda.OandaError as e:
+            assert "token" in str(e)
+        else:
+            raise AssertionError("no error")
+    assert len(asked) == 1, len(asked)
+    print("PASS  a bad token fails once instead of being split and retried")
+
+
+def test_a_failed_download_prints_a_plain_message():
+    import io
+    import contextlib
+    import oanda
+
+    def broken(weeks, log=print):
+        raise oanda.OandaServerError(
+            "OANDA error 504: " + oanda._explain(type("R", (), {
+                "status_code": 504, "text": "<!DOCTYPE html><html></html>",
+                "json": lambda self: {}})()))
+
+    err = io.StringIO()
+    with patch("backtest.fetch", broken), contextlib.redirect_stderr(err):
+        code = bt.main(["backtest.py", "12"])
+    text = err.getvalue()
+    assert code == 1 and "<" not in text and "OANDA's side" in text, text
+    print("PASS  a 504 comes out as a sentence, not an HTML page")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:
