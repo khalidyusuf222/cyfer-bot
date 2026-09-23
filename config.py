@@ -49,6 +49,13 @@ class StrategyParams:
     min_alert_score: int = 2
     min_auto_score: int = 3
 
+    # [CHOICE 2026-09-23] At most one open position per pair. Without it,
+    # a trending hour-after-hour market opens a fresh long every hour —
+    # three EUR/USD longs is three times the per-trade risk riding on one
+    # idea, which the per-trade limit quietly assumes can't happen. False
+    # restores stacking.
+    one_position_per_pair: bool = True
+
     # ---------------------------------------------------------------------
     # [FIX 2026-09-14] Bad-print guard. A 1m bar closed 0.52% away from the
     # real market on a thin feed; the bracket was priced off it, the limit
@@ -151,15 +158,37 @@ class RiskParams:
     # reason is mathematical - even a string of 10 consecutive losses at 1%
     # leaves you with 90% of your capital."
     #
-    # This was at 20% at Bob's instruction under the previous strategy. At
-    # 20%, ten consecutive losses leave GBP 107 of a GBP 1,000 account, not
-    # GBP 900. Set to the top of the book's own range.
+    # [BOB 2026-09-23] Set to 10% on Bob's direct instruction, ten times
+    # the top of the book's range. At 10%, ten consecutive losses leave
+    # GBP 349 of GBP 1,000 (compounding) or nothing at all (fixed size,
+    # which is what this bot does - it sizes off account_gbp, not the live
+    # balance). History: 20% (old strategy) -> 1% (book) -> 10% (Bob).
+    #
+    # On most Cyfer setups the full 10% is not physically possible: the
+    # position would need more leverage than a UK retail account is
+    # allowed (see max_leverage_* below). Those trades are cut down to the
+    # largest size the limit allows rather than skipped, so the real risk
+    # per trade will usually land between about 3% and 10%.
     # ---------------------------------------------------------------------
-    risk_per_trade_pct: float = 1.0
+    risk_per_trade_pct: float = 10.0
 
-    # [CHOICE] The book sets no daily cap. Six trades at 1% each, so this
-    # binds only on a genuinely bad day.
-    max_daily_loss_pct: float = 4.0
+    # [CHOICE] The book sets no daily cap. Was 4% at 1% risk. At 10% that
+    # would lock the day after a single loss, so it is now two full losses.
+    max_daily_loss_pct: float = 20.0
+
+    # [OANDA UK retail] Maximum leverage. 30:1 (3.33% margin) on pairs of
+    # USD, EUR, JPY, GBP, CAD and CHF - so EUR/USD, GBP/USD, USD/JPY.
+    # 20:1 (5% margin) on everything else, which includes AUD/USD.
+    # Source: OANDA Europe Markets, "Margin Rates and Leverage Ratios for
+    # Retail Clients".
+    max_leverage_major: float = 30.0
+    max_leverage_other: float = 20.0
+    leverage_major_ccys: tuple = ("USD", "EUR", "JPY", "GBP", "CAD", "CHF")
+
+    # [CHOICE] Use at most this share of the limit, so the spread or a
+    # small move between sizing and filling can't tip an order over it and
+    # get it rejected for insufficient margin.
+    leverage_headroom_pct: float = 90.0
 
     # [CHOICE] Kept at 6 for paper testing, to build trade history faster.
     max_trades_per_day: int = 6

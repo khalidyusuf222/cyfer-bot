@@ -369,22 +369,30 @@ def test_coherence_catches_an_impossible_drawdown_target():
     finally:
         object.__setattr__(CONFIG, "risk", original)
 
-    quiet = review.coherence_warnings()
+    object.__setattr__(CONFIG, "risk",
+                       dataclasses.replace(original, risk_per_trade_pct=1.0))
+    try:
+        quiet = review.coherence_warnings()
+    finally:
+        object.__setattr__(CONFIG, "risk", original)
     assert not any("Drawdown target" in w for w in quiet), quiet
-    print(f"PASS  fires at 20% risk, silent at the configured "
-          f"{original.risk_per_trade_pct}%")
+    print("PASS  fires at 20% risk, silent at 1%")
 
 
-def test_current_config_is_internally_coherent():
+def test_a_contradiction_in_the_live_config_is_never_silent():
     """
-    The live settings must not contradict each other. One losing trade at
-    the configured risk has to stay inside the drawdown ceiling.
+    If one losing trade at the configured risk breaks the drawdown ceiling,
+    the review must say so. Bob chose 10% risk against a 5% ceiling on
+    2026-09-23; that is his call, but the weekly review has to flag it
+    rather than quietly fail the benchmark every week.
     """
-    assert CONFIG.risk.risk_per_trade_pct <= CONFIG.review.max_drawdown_pct, (
-        f"{CONFIG.risk.risk_per_trade_pct}% risk breaches a "
-        f"{CONFIG.review.max_drawdown_pct}% ceiling on the first loss")
-    print(f"PASS  {CONFIG.risk.risk_per_trade_pct}% risk fits inside the "
-          f"{CONFIG.review.max_drawdown_pct}% drawdown ceiling")
+    loud = review.coherence_warnings()
+    breaches = CONFIG.risk.risk_per_trade_pct > CONFIG.review.max_drawdown_pct
+    flagged = any("Drawdown target is unreachable" in w for w in loud)
+    assert breaches == flagged, (breaches, loud)
+    print(f"PASS  {CONFIG.risk.risk_per_trade_pct:g}% risk vs "
+          f"{CONFIG.review.max_drawdown_pct:g}% ceiling: "
+          f"{'flagged' if flagged else 'coherent, nothing to flag'}")
 
 
 def test_chunks_never_exceed_the_limit():

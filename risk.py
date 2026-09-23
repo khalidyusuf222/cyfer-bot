@@ -46,6 +46,7 @@ class SizedTrade:
     halved: bool
     halve_reason: str
     warnings: list[str]
+    capped: bool = False       # cut down to fit the leverage limit / free margin
 
     @property
     def tradeable(self) -> bool:
@@ -210,13 +211,28 @@ def check(conn: sqlite3.Connection) -> RiskVerdict:
 # Sizing
 # ===========================================================================
 
+def max_leverage(pair) -> float:
+    """
+    The most leverage a UK retail account may use on this pair.
+
+    [OANDA UK retail] 30:1 when both currencies are USD, EUR, JPY, GBP,
+    CAD or CHF; 20:1 otherwise - which puts AUD/USD at 20:1.
+    """
+    r = CONFIG.risk
+    majors = r.leverage_major_ccys
+    if pair.base in majors and pair.quote in majors:
+        return r.max_leverage_major
+    return r.max_leverage_other
+
+
 def size_trade(entry: float,
                stop: float,
                symbol: str | None = None,
                account_gbp: float | None = None,
                median_stop_pct: float | None = None,
                news_day: bool = False,
-               target: float | None = None) -> SizedTrade:
+               target: float | None = None,
+               margin_available_gbp: float | None = None) -> SizedTrade:
     """
     Size a position so that being stopped out costs exactly the configured
     percentage of the account, in GBP.
@@ -283,29 +299,57 @@ def size_trade(entry: float,
     warnings.extend(sized.notes)
 
     units = sized.units
-    exposure_gbp = units * entry * quote_rate
-    leverage = exposure_gbp / account if account else 0.0
+    per_unit_gbp = entry * quote_rate
 
     # --- leverage ---------------------------------------------------------
-    # Forex positions are always larger than the account — that is what
-    # leverage is, and it is not a fault. What matters is HOW much larger,
-    # because the broker caps it and because the honest way to read the
-    # number is "this is the size of the thing your GBP 10 is controlling".
-    if leverage > 30:
-        warnings.append(
-            f"Position is {leverage:.0f}x the account (£{exposure_gbp:,.0f} "
-            f"controlled by £{account:,.0f}). UK retail leverage is capped "
-            f"at 30:1 on majors, so the broker will refuse this. The stop "
-            f"is too tight for the risk budget — widen it or cut the risk.")
-        units = 0
-    elif leverage > 10:
+    # Forex positions are always larger than the account - that is what
+    # leverage is, and it is not a fault. But the broker caps HOW much
+    # larger: margin (a deposit the broker holds while the trade is open)
+    # must cover exposure / limit, and it has to come out of free margin,
+    # which another open trade may already be using.
+    #
+    # When the risk budget asks for more than that, the position is cut to
+    # the largest size that fits instead of being skipped. The order would
+    # be rejected by the broker at full size anyway; cutting it means the
+    # trade still happens, at less risk than asked for, and says so.
+    limit = max_leverage(pair)
+    usable = limit * r.leverage_headroom_pct / 100
+    free = account if margin_available_gbp is None else max(0.0, margin_available_gbp)
+    max_exposure = free * usable
+    capped = False
+
+    if units > 0 and per_unit_gbp > 0 and units * per_unit_gbp > max_exposure:
+        full_units = units
+        full_lev = full_units * per_unit_gbp / account if account else 0.0
+        units = int(max_exposure // per_unit_gbp)
+        capped = True
+        if units <= 0:
+            warnings.append(
+                f"No free margin left for {pair.display} - another open "
+                f"trade is using it. UK accounts are capped at "
+                f"{limit:.0f}x leverage on this pair. Nothing to trade.")
+        else:
+            cut_risk = units * stop_distance * quote_rate
+            why = (f"{pair.display} is capped at {limit:.0f}x for UK accounts"
+                   + (f" and there's £{free:,.0f} of free margin"
+                      if margin_available_gbp is not None else ""))
+            warnings.append(
+                f"Cut from {full_units:,} to {units:,} units. Risking the full "
+                f"£{effective_risk_gbp:,.2f} would need {full_lev:.0f}x "
+                f"leverage; {why}. Risking "
+                f"£{cut_risk:,.2f} ({cut_risk / account * 100:.1f}%) instead.")
+
+    exposure_gbp = units * per_unit_gbp
+    leverage = exposure_gbp / account if account else 0.0
+
+    if leverage > 10 and not capped:
         warnings.append(
             f"Position is {leverage:.0f}x the account. Within broker limits, "
             f"but £{exposure_gbp:,.0f} of currency is being moved by "
             f"£{account:,.0f} of yours. The stop is what keeps that "
-            f"survivable — nothing else does.")
+            f"survivable - nothing else does.")
 
-    if units <= 0 and not any("refuse" in w for w in warnings):
+    if units <= 0 and not capped:
         warnings.append("Sizing resolved to zero units. Nothing to trade.")
 
     actual_risk_gbp = units * stop_distance * quote_rate
@@ -333,6 +377,7 @@ def size_trade(entry: float,
         halved=halved,
         halve_reason=halve_reason,
         warnings=warnings,
+        capped=capped,
     )
 
 

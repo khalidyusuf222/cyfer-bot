@@ -72,7 +72,11 @@ conn = tracker.connect()
 COLOURS = {"urgent": 0xE03131, "warn": 0xF08C00,
            "info": 0x1971C2, "good": 0x2F9E44, "setup": 0x0E7C86}
 
-_alerted: set[str] = set()          # setups already announced this session
+_alerted: set[str] = set()          # setups already announced this hour
+# Kept separate from _alerted on purpose. They used to be one set, and a
+# weak 2/6 alert at 14:05 used up the hour's slot — so the same setup
+# improving to a tradeable 3/6 at 14:20 was silently never traded.
+_traded: set[str] = set()
 _recent_setups: dict = {}           # ticker -> (Setup, phase) for !b to attach
 
 
@@ -194,16 +198,28 @@ async def _scan_ticker(ticker: str, channel, state) -> None:
         return
 
     key = f"{ticker}:{setup.direction}:{state.now_et.strftime('%Y-%m-%d-%H')}"
-    if key in _alerted:
-        return
+    first_alert = key not in _alerted
     _alerted.add(key)
 
     _recent_setups[ticker.upper()] = (setup, state.phase)
 
-    if (execution.auto_enabled(conn)
-            and setup.score >= CONFIG.strategy.min_auto_score
-            and setup.tradeable):
+    will_trade = (execution.auto_enabled(conn)
+                  and setup.score >= CONFIG.strategy.min_auto_score
+                  and setup.tradeable
+                  and key not in _traded)
+
+    # One position per pair. The backtest applies the same rule, so what it
+    # reports is what this loop would actually do.
+    if (will_trade and CONFIG.strategy.one_position_per_pair
+            and tracker.find_open(conn, ticker) is not None):
+        will_trade = False
+        log.info("%s: setup qualifies but a position is already open", ticker)
+
+    if will_trade:
+        _traded.add(key)
         await _auto_execute(setup, state, channel)
+    elif not first_alert:
+        return                      # already told Bob about this one
 
     await channel.send(
         content="@here" if setup.score >= CONFIG.strategy.min_auto_score
@@ -215,6 +231,25 @@ async def _scan_ticker(ticker: str, channel, state) -> None:
                         f"{state.reason}"),
                     "setup"),
     )
+
+
+def _free_margin_gbp():
+    """
+    OANDA's free margin right now, in GBP, or None if it can't be read.
+
+    Margin is the deposit the broker holds while a trade is open. Free
+    margin is what is left to open the next one with. None makes the sizer
+    fall back to the account size, which is right when nothing is open.
+    """
+    if execution.broker_name() != "oanda":
+        return None
+    try:
+        import oanda
+        return float(oanda.account_summary()["margin_available"])
+    except Exception as e:  # noqa: BLE001 - sizing still works without it
+        log.warning("Couldn't read free margin (%s); sizing off the account "
+                    "size instead", e)
+        return None
 
 
 async def _auto_execute(setup, state, channel) -> None:
@@ -274,9 +309,14 @@ async def _auto_execute(setup, state, channel) -> None:
         # invents its own 2:1 target and the reward figure shown to Bob is
         # the minimum the book allows rather than the one the order is
         # actually carrying — understating a 3.3:1 trade as a 2:1 one.
+        #
+        # Free margin comes from OANDA, so a second trade is sized to what
+        # the first one left over instead of being sent at full size and
+        # rejected by the broker.
+        free_margin = await asyncio.to_thread(_free_margin_gbp)
         sized = await asyncio.to_thread(
             risk.size_trade, setup.entry, setup.stop, setup.ticker,
-            None, None, False, setup.target)
+            None, None, False, setup.target, free_margin)
     except ValueError as e:
         await channel.send(embed=embed("Auto-execute refused", str(e), "warn"))
         return
@@ -414,7 +454,9 @@ async def _auto_execute(setup, state, channel) -> None:
         f"Target `{setup.target:.{d}f}`\n"
         f"Risk **£{sized.risk_gbp:,.2f}** to make "
         f"**£{sized.reward_gbp:,.2f}**\n\n"
-        f"Stop and target are held by OANDA, not by me — they survive this "
+        + ("".join(f"⚠️ {w}\n\n" for w in sized.warnings
+                   if w.startswith("Cut from")))
+        + f"Stop and target are held by OANDA, not by me — they survive this "
         f"bot going down.\n\n"
         f"Trade `{str(order.order_id)[:8]}` · status `{order.status}`\n"
         f"`!halt` closes everything.",
@@ -1873,6 +1915,81 @@ async def cmd_version(ctx):
     await ctx.send(embed=embed("Version", "\n".join(lines), "info"))
 
 
+_backtest_running = False
+
+
+@bot.command(name="backtest", aliases=["bt"])
+async def cmd_backtest(ctx, weeks: str = None):
+    """
+    !backtest [weeks] — replay the strategy over past OANDA prices.
+
+    Runs backtest.py as a SEPARATE program rather than inside the bot. It
+    runs the strategy tens of thousands of times, and doing that in here
+    would compete with the live scan loop for the same processor. As its
+    own process it can't slow the bot down, and it never touches the trade
+    database — it only reads price history.
+    """
+    import sys
+    import backtest as bt
+
+    global _backtest_running
+    if _backtest_running:
+        await ctx.send(embed=embed(
+            "Already running", "One backtest at a time — it'll post when "
+            "it's done.", "info"))
+        return
+
+    try:
+        n = int(weeks) if weeks else bt.DEFAULT_WEEKS
+    except ValueError:
+        await ctx.send(embed=embed(
+            "That didn't work", f"`!backtest 12` — weeks as a number, not "
+            f"'{weeks}'.", "warn"))
+        return
+    n = max(1, min(n, bt.MAX_WEEKS))
+
+    _backtest_running = True
+    try:
+        await ctx.send(embed=embed(
+            f"Backtest running — last {n} weeks",
+            f"Fetching {n} weeks of OANDA prices for all four pairs, then "
+            f"replaying the strategy five minutes at a time, exactly as the "
+            f"live bot would have traded it.\n\n"
+            f"Usually under two minutes. The live bot keeps running "
+            f"normally while this works.", "info"))
+
+        here = Path(__file__).parent
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, str(here / "backtest.py"), str(n),
+            cwd=str(here),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=900)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await ctx.send(embed=embed(
+                "Backtest took too long",
+                "Stopped after 15 minutes. Try fewer weeks: `!backtest 4`.",
+                "warn"))
+            return
+
+        text = (out or b"").decode("utf-8", "replace").strip()
+        if proc.returncode != 0 or not text:
+            tail = (err or b"").decode("utf-8", "replace").strip()[-900:]
+            await ctx.send(embed=embed(
+                "Backtest failed",
+                f"```\n{tail or 'no output'}\n```", "warn"))
+            return
+
+        parts = review.chunks(text)
+        for i, part in enumerate(parts, 1):
+            title = ("Backtest" if len(parts) == 1
+                     else f"Backtest ({i}/{len(parts)})")
+            await ctx.send(embed=embed(title, part, "info"))
+    finally:
+        _backtest_running = False
+
+
 @bot.command(name="params")
 async def cmd_params(ctx):
     await ctx.send(embed=embed("Parameters", parameter_report(), "info"))
@@ -1938,6 +2055,7 @@ async def cmd_help(ctx):
         "`!eod` — full end-of-day summary now\n"
         "`!sync` — ask OANDA how the open trades ended\n"
         "`!mx` — benchmark table · `!review` — full weekly review\n"
+        "`!backtest` — how it would have done over the last 12 weeks\n"
         "`!ai` — what the AI reviewer blocked · `!lessons` — the journal\n\n"
         "**Checking**\n"
         "`!chart` — live scan: why it is or isn't trading\n"
