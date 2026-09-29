@@ -505,18 +505,25 @@ def scan(ticker: str,
             f"({level.touches} rejections, needs {c.level_min_touches})")
 
     # --- 3. the trigger candle  [p36-37] ----------------------------------
+    # The newest candle first, then up to trigger_lookback - 1 before it.
     prev, cur = bars_ltf[-2], bars_ltf[-1]
-    eng = engulfing(prev, cur)
-    rej = wick_rejection(cur)
+    look = max(1, min(getattr(c, "trigger_lookback", 1), len(bars_ltf) - 1))
+    found = None
+    for back in range(look):
+        p_bar, c_bar = bars_ltf[-2 - back], bars_ltf[-1 - back]
+        ago = "" if back == 0 else f", {back * 5} min ago"
+        if engulfing(p_bar, c_bar) == sig.direction:
+            found = (f"{sig.direction.title()} engulfing candle{ago} — body "
+                     f"engulfs the previous")
+        elif wick_rejection(c_bar) == sig.direction:
+            found = (f"Wick rejection {sig.direction}{ago} — price pushed "
+                     f"through and was pushed back")
+        if found:
+            break
 
-    if eng == sig.direction:
+    if found:
         sig.trigger_ok = True
-        sig.conditions_met.append(
-            f"{eng.title()} engulfing candle — body engulfs the previous")
-    elif rej == sig.direction:
-        sig.trigger_ok = True
-        sig.conditions_met.append(
-            f"Wick rejection {rej} — price pushed through and was pushed back")
+        sig.conditions_met.append(found)
     elif is_doji(cur):
         sig.conditions_missing.append(
             "Doji — indecision, neither side in control. Not a trigger.")
@@ -619,6 +626,25 @@ def scan(ticker: str,
             "No level to place a stop against, so no trade can be priced")
 
     return sig
+
+
+def blockers(sig: Optional[Signal]) -> list[str]:
+    """
+    Why this scan didn't trade, in short words, for !whynot's tally.
+    Empty means it qualified. The order is the book's: trend, level,
+    trigger, then the reward-to-risk.
+    """
+    if sig is None:
+        return ["not enough data"]
+    if sig.tradeable:
+        return []
+    out = list(sig.core_missing)
+    if sig.entry > 0 and sig.level is not None and \
+            sig.rr < CONFIG.cyfer.min_risk_reward:
+        out.append("under 2:1 to the next level")
+    if any("Bad print" in c for c in sig.conditions_missing):
+        out.append("bad price print")
+    return out or ["other"]
 
 
 # ===========================================================================

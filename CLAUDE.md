@@ -52,7 +52,7 @@ Tests are plain functions, **not** pytest or unittest. Run every file:
 
 Each file prints "All N tests passed." (`python -m unittest` finds 0 tests
 and says OK, which proves nothing.) All tests run offline. Currently
-there are about 310 across 15 files. Run them all before every push.
+there are about 320 across 16 files. Run them all before every push.
 
 ## Current settings (config.py)
 
@@ -78,6 +78,10 @@ there are about 310 across 15 files. Run them all before every push.
   (`cyfer.target_at_next_level`). Both switches came in on 23 Sep, after the
   first backtest found no edge. `!backtest 12 compare` replays old and new
   rules side by side.
+- Trigger candle must be the latest 5-minute candle
+  (`cyfer.trigger_lookback = 1`); trend needs 3 swings each way
+  (`trend_swings_required = 3`). Both are [CHOICE]; compare mode tests
+  looser values. `!whynot` shows what's been blocking trades.
 - No new trades after 12:00 New York time on Friday
   (`sessions.friday_last_entry`).
 - AI reviewer (Groq, `openai/gpt-oss-120b`): **veto only**, off unless
@@ -125,7 +129,8 @@ the server.
 1. Delete `migrate.sh` (a one-off from the rename). Remind the owner that the
    old folder on the server can be removed.
 2. Read `!backtest 12 compare` and `!backtest 12 compare older` with the
-   owner. Keep only rule changes that win on both stretches.
+   owner (rows include a 15-minute trigger window and a 2-swing trend).
+   Switch on only what wins on both stretches.
 3. Add an economic calendar so the bot sits out high-impact news
    (book p62-65). There's none yet.
 

@@ -556,6 +556,48 @@ def test_ema_wording_no_longer_invents_a_trend():
     print("PASS  the EMA line no longer claims a trend that isn't there")
 
 
+def test_trigger_window_finds_a_recent_rejection():
+    """
+    [CHOICE 2026-09-29] trigger_lookback: a bullish engulfing one candle
+    back, with price still on the level, counts only when the window is
+    wider than one candle.
+    """
+    from config import override
+    sup = cyfer.Level(100.3, "support", 3)
+    res = cyfer.Level(104.0, "resistance", 3)
+    ltf = [bar(100.5, 100.6, 100.4, 100.5, i) for i in range(4)] + [
+        bar(100.6, 100.7, 100.4, 100.5, 4),      # small bearish
+        bar(100.45, 100.9, 100.4, 100.85, 5),    # bullish engulfing
+        bar(100.5, 100.55, 100.45, 100.5, 6),    # flat: no trigger now
+    ]
+    from unittest.mock import patch
+    trend = cyfer.TrendState("uptrend", "test")
+    with patch("cyfer.find_levels", lambda *a, **k: [sup, res]), \
+            patch("cyfer.trend_state", lambda *a, **k: trend):
+        with override(cyfer={"trigger_lookback": 1}):
+            now_only = cyfer.scan("X", zigzag([100, 110] * 4), ltf)
+        with override(cyfer={"trigger_lookback": 3}):
+            window = cyfer.scan("X", zigzag([100, 110] * 4), ltf)
+    assert not now_only.trigger_ok and not now_only.tradeable
+    assert window.trigger_ok and window.tradeable, window.conditions_missing
+    assert any("5 min ago" in c for c in window.conditions_met), \
+        window.conditions_met
+    print("PASS  a trigger 5 minutes ago counts once the window allows it")
+
+
+def test_blockers_name_what_stopped_the_trade():
+    assert cyfer.blockers(None) == ["not enough data"]
+    ok = full_setup(entry=100, stop=99, target=102)
+    assert cyfer.blockers(ok) == []
+    no_trig = cyfer.Signal("X", "bullish", entry=100, stop=99, target=102,
+                           level=cyfer.Level(99.5, "support", 3),
+                           trend_ok=True)
+    assert cyfer.blockers(no_trig) == ["trigger candle"]
+    tight = full_setup(entry=100, stop=99, target=101)
+    assert cyfer.blockers(tight) == ["under 2:1 to the next level"]
+    print("PASS  !whynot names the missing piece: trigger, trend, level or 2:1")
+
+
 def _old_structure_breaks(bars, swings):
     """The original, slow version, kept here to check the fast one."""
     out = []

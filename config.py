@@ -166,6 +166,14 @@ class CyferParams:
     # is skipped. With no level in the way it falls back to 2:1.
     target_at_next_level: bool = True
 
+    # [CHOICE 2026-09-29] How many of the latest 5-minute candles may hold
+    # the trigger. 1 means only the candle that just closed: a rejection
+    # candle five minutes ago, with price still sitting on the level, was
+    # ignored. The book doesn't say how fresh a trigger must be. The level
+    # check still uses the price right now, so a trigger that price has
+    # already run away from can't qualify. Compare mode tests 3 (15 min).
+    trigger_lookback: int = 1
+
     # [BOOK p45] Higher timeframes take precedence — they filter the noise.
     # Trend and levels come from the first; the trigger from the second.
     htf: str = "1Hour"

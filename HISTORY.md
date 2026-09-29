@@ -225,6 +225,30 @@ edge on the backtest and on demo, then trade a bigger or funded account.
 The bot has no economic calendar, so it can't. That needs a calendar feed
 and is the next thing worth adding.
 
+**24 Sep: first compare run (1 Jul to 23 Sep).** Old rules: 205 trades,
+-0.03R a trade, lowest £608. Current rules: 18 trades, +0.09R a trade,
++£241, lowest £908. No break-even: +0.03R. Golden hours only: +0.39R but
+from 9 trades. Better than the old rules, but 18 trades proves nothing.
+The report called the old rules "best" because they were the only row with
+20+ trades; fixed on 29 Sep.
+
+**29 Sep: "no trades all week".** Checked the live path offline: a qualifying
+setup does reach the order step, and the price feed matches the backtest's.
+No bug found; the rules are just rare (about one trade every 4-5 days in
+the backtest). Added:
+
+- `!whynot`: per pair, how many scans, how many qualified, near misses (two
+  of trend/level/trigger present) and what was missing most. Also counts
+  scans skipped by the clock, the risk lock, auto being off, or a pair
+  already open. In memory, reset on restart.
+- `cyfer.trigger_lookback` (default 1, unchanged): how many recent
+  5-minute candles may hold the trigger.
+- New compare rows: trigger in the last 15 min, trend from 2 swings, and
+  both. On random prices they trade 2.9, 6.4 and 8.4 times a week (current
+  2.3), and all still lose, so no peeking. Whether they help on real
+  prices is for `!backtest 12 compare` and `... older` to say. Defaults
+  left as they were until then.
+
 ---
 
 ## Standing decisions

@@ -80,6 +80,29 @@ _alerted: set[str] = set()          # setups already announced this hour
 _traded: set[str] = set()
 _recent_setups: dict = {}           # ticker -> (Setup, phase) for !b to attach
 
+# [2026-09-29] What stopped each scan from trading, since the bot started.
+# Read by !whynot. In memory only, so a restart clears it.
+from collections import Counter as _Counter
+from datetime import datetime as _dt, timezone as _tz
+_why = {"since": _dt.now(_tz.utc), "gates": _Counter(), "pairs": {}}
+
+
+def _tally(ticker: str, sig) -> None:
+    p = _why["pairs"].setdefault(ticker, {"scans": 0, "qualified": 0,
+                                          "near": 0, "best": 0,
+                                          "blocked": _Counter()})
+    p["scans"] += 1
+    if sig is not None:
+        p["best"] = max(p["best"], sig.score)
+    reasons = cyfer.blockers(sig)
+    if not reasons:
+        p["qualified"] += 1
+        return
+    if sig is not None and len(sig.core_missing) == 1:
+        p["near"] += 1                  # two of the book's three were there
+    for r in reasons:
+        p["blocked"][r] += 1
+
 
 def embed(title: str, desc: str, kind: str = "info") -> discord.Embed:
     return discord.Embed(title=title, description=desc,
@@ -160,10 +183,12 @@ async def scan_loop():
         await _end_of_day(channel, state)
 
         if not state.can_enter:
+            _why["gates"]["outside trading hours"] += 1
             return
 
         verdict = risk.check(conn)
         if not verdict.allowed:
+            _why["gates"][verdict.reason] += 1
             return
 
         # The whole watchlist, not just two. Four pairs across a 13-hour
@@ -198,6 +223,7 @@ async def _scan_ticker(ticker: str, channel, state) -> None:
     ema_dir = graystone.ema_stack_direction(bars_htf)
 
     setup = cyfer.scan(ticker, bars_htf, bars_ltf, ema_direction=ema_dir)
+    _tally(ticker, setup)
 
     if setup is None or setup.score < CONFIG.strategy.min_alert_score:
         return
@@ -218,7 +244,11 @@ async def _scan_ticker(ticker: str, channel, state) -> None:
     if (will_trade and CONFIG.strategy.one_position_per_pair
             and tracker.find_open(conn, ticker) is not None):
         will_trade = False
+        _why["gates"][f"{ticker} already has an open position"] += 1
         log.info("%s: setup qualifies but a position is already open", ticker)
+    elif (setup.tradeable and setup.score >= CONFIG.strategy.min_auto_score
+          and not execution.auto_enabled(conn)):
+        _why["gates"]["auto-trading is off"] += 1
 
     if will_trade:
         _traded.add(key)
@@ -2073,6 +2103,32 @@ async def cmd_backtest(ctx, *args: str):
         _backtest_running = False
 
 
+@bot.command(name="whynot", aliases=["blocked"])
+async def cmd_why(ctx):
+    """!whynot — what has stopped the bot trading, pair by pair."""
+    since = _why["since"].astimezone(sessions.UK)
+    lines = [f"Since the bot started, {since:%a %d %b %H:%M} UK.", ""]
+    if not _why["pairs"]:
+        lines.append("No scans yet inside trading hours.")
+    for tick, p in sorted(_why["pairs"].items()):
+        top = ", ".join(f"{r} ({n})" for r, n in p["blocked"].most_common(3))
+        lines.append(f"**{tick}**: {p['scans']} scans · "
+                     f"{p['qualified']} qualified · {p['near']} near misses "
+                     f"· best score {p['best']}/6")
+        if top:
+            lines.append(f"Most often missing: {top}")
+    if _why["gates"]:
+        lines += ["", "**Scans skipped or blocked before trading:**"]
+        for r, n in _why["gates"].most_common(5):
+            lines.append(f"• {r} ({n})")
+    lines += ["",
+              "*A scan runs every minute per pair. \"Near miss\" means two "
+              "of the book's three (trend, level, trigger) were there. "
+              "Qualified scans become trades unless a gate below stopped "
+              "them.*"]
+    await ctx.send(embed=embed("Why no trade?", "\n".join(lines), "info"))
+
+
 @bot.command(name="params")
 async def cmd_params(ctx):
     await ctx.send(embed=embed("Parameters", parameter_report(), "info"))
@@ -2144,6 +2200,7 @@ async def cmd_help(ctx):
         "`!ai` — what the AI reviewer blocked · `!lessons` — the journal\n\n"
         "**Checking**\n"
         "`!chart` — live scan: why it is or isn't trading\n"
+        "`!whynot` — what's been stopping trades since the bot started\n"
         "`!ss` — session clock · `!r` — risk status\n"
         "`!st` — scorecard\n"
         "`!l` — what your logged trades actually show\n"

@@ -80,8 +80,14 @@ VARIANTS = [
         "cyfer": {"require_core": False, "target_at_next_level": False},
         "sessions": {"friday_last_entry": "16:00"}}),
     ("Current settings", {}),
-    ("Current, no break-even", {"cyfer": {"breakeven_enabled": False}}),
-    ("Current, golden hours only", {"sessions": {"golden_hours_only": True}}),
+    # [2026-09-29] Two ways to get more trades without dropping the book's
+    # trend + level + trigger. Both are [CHOICE] numbers, so the prices
+    # decide. (No break-even and golden-hours-only were tested on 24 Sep:
+    # no break-even did worse; golden hours had too few trades to judge.)
+    ("Trigger in last 15 min", {"cyfer": {"trigger_lookback": 3}}),
+    ("Trend from 2 swings", {"cyfer": {"trend_swings_required": 2}}),
+    ("Both of those", {"cyfer": {"trigger_lookback": 3,
+                                 "trend_swings_required": 2}}),
 ]
 
 
@@ -771,11 +777,25 @@ def compare_report(rows: list[tuple[str, dict]], weeks: int,
               and s["r_mean"] is not None]
     if scored:
         best_name, best = max(scored, key=lambda x: x[1]["r_mean"])
-        lines.append(f"Best per trade on these weeks: **{best_name}** "
-                     f"({best['r_mean']:+.2f}R).")
+        if best["r_mean"] <= 0:
+            lines.append(f"Of the rows with enough trades to rank, none "
+                         f"made money (best: {best_name}, "
+                         f"{best['r_mean']:+.2f}R).")
+        elif len(scored) == 1:
+            lines.append(f"Only **{best_name}** has enough trades to rank: "
+                         f"{best['r_mean']:+.2f}R a trade.")
+        else:
+            lines.append(f"Best per trade on these weeks: **{best_name}** "
+                         f"({best['r_mean']:+.2f}R).")
     else:
         lines.append(f"No row has {CONFIG.review.min_trades_to_diagnose}+ "
                      f"trades, so none can be judged yet. Try more weeks.")
+    thin = [n for n, s in rows
+            if 0 < s["trades"] < CONFIG.review.min_trades_to_diagnose]
+    if thin:
+        lines.append(f"Too few trades to rank (under "
+                     f"{CONFIG.review.min_trades_to_diagnose}): "
+                     f"{', '.join(thin)}. Their R figures could be luck.")
     lines += [
         "",
         "*Judge rows by R a trade, not pounds. A rule that wins here has to "

@@ -492,17 +492,19 @@ def test_compare_replays_every_rule_set_and_puts_the_settings_back():
     seen = []
 
     def fake_run(history, start=None, progress=None):
-        seen.append((C.cyfer.require_core, C.cyfer.breakeven_enabled,
-                     C.sessions.golden_hours_only))
+        seen.append((C.cyfer.require_core, C.cyfer.trigger_lookback,
+                     C.cyfer.trend_swings_required))
         return bt.Result(trades=[], start=None, end=None, pairs=["EUR_USD"])
 
     with patch("backtest.run", fake_run):
         rows = bt.compare({}, start=T0)
     assert [n for n, _ in rows] == [n for n, _ in bt.VARIANTS]
+    live = (True, C.cyfer.trigger_lookback, C.cyfer.trend_swings_required)
     assert seen[0][0] is False                 # old rules: no core rule
-    assert seen[1] == (True, True, False)      # current settings
-    assert seen[2][1] is False                 # no break-even
-    assert seen[3][2] is True                  # golden hours only
+    assert seen[1] == live                     # current settings
+    assert seen[2][1] == 3                     # 15-minute trigger window
+    assert seen[3][2] == 2                     # trend from 2 swings
+    assert seen[4][1:] == (3, 2)               # both
     assert (C.cyfer, C.sessions) == before, "settings weren't put back"
     print("PASS  compare replays each rule set, then restores the settings")
 
@@ -520,6 +522,20 @@ def test_compare_report_reads_cleanly():
     older = bt.compare_report(rows, 12, older=True)
     assert "older stretch" in older
     print("PASS  the compare report names every row and says how to check it")
+
+
+def test_compare_never_crowns_a_losing_or_thin_row():
+    def summ(trades, r):
+        return {"trades": trades, "r_mean": r, "r_total": r * trades,
+                "win_rate": 0.4, "breakeven_rate": 0.35, "pnl": r * trades,
+                "per_week": 1.0, "profit_factor": 1.0, "lowest_equity": 900,
+                "start": T0, "end": T0}
+    text = bt.compare_report([("Old", summ(200, -0.03)),
+                              ("New", summ(18, 0.09))], 12)
+    assert "none made money" in text, text
+    assert "Too few trades to rank" in text and "New" in text
+    assert "Best per trade" not in text
+    print("PASS  a losing row is never called the best; thin rows are flagged")
 
 
 def test_report_shows_results_in_r():
